@@ -18,6 +18,8 @@
 --
 -- Table structure for table `batch`
 --
+create schema if not exists sourdough;
+use sourdough;
 
 DROP TABLE IF EXISTS `batch`;
 /*!40101 SET @saved_cs_client     = @@character_set_client */;
