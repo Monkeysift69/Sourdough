@@ -1,0 +1,1 @@
+**_npm install mysql2 dotenv bcryptjs express_**

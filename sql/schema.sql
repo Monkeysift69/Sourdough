@@ -1,0 +1,309 @@
+-- MySQL dump 10.13  Distrib 26.7.0, for Win64 (x86_64)
+--
+-- Host: localhost    Database: sourdough
+-- ------------------------------------------------------
+-- Server version	26.7.0
+
+/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;
+/*!40101 SET @OLD_CHARACTER_SET_RESULTS=@@CHARACTER_SET_RESULTS */;
+/*!40101 SET @OLD_COLLATION_CONNECTION=@@COLLATION_CONNECTION */;
+/*!50503 SET NAMES utf8mb4 */;
+/*!40103 SET @OLD_TIME_ZONE=@@TIME_ZONE */;
+/*!40103 SET TIME_ZONE='+00:00' */;
+/*!40014 SET @OLD_UNIQUE_CHECKS=@@UNIQUE_CHECKS, UNIQUE_CHECKS=0 */;
+/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;
+/*!40101 SET @OLD_SQL_MODE=@@SQL_MODE, SQL_MODE='NO_AUTO_VALUE_ON_ZERO' */;
+/*!40111 SET @OLD_SQL_NOTES=@@SQL_NOTES, SQL_NOTES=0 */;
+
+--
+-- Table structure for table `batch`
+--
+
+DROP TABLE IF EXISTS `batch`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `batch` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `feeding_time` datetime NOT NULL,
+  `mix_time` datetime DEFAULT NULL,
+  `bulk_ferment_start` datetime DEFAULT NULL,
+  `bulk_ferment_end` datetime DEFAULT NULL,
+  `cold_proof_start` datetime DEFAULT NULL,
+  `cold_proof_end` datetime DEFAULT NULL,
+  `qty_removed_g` int NOT NULL,
+  `loaf_count` int NOT NULL,
+  `starter_id` int NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `fk_batch_feeding` (`starter_id`,`feeding_time`),
+  CONSTRAINT `fk_batch_feeding` FOREIGN KEY (`starter_id`, `feeding_time`) REFERENCES `feeding` (`starter_id`, `feed_time`) ON DELETE RESTRICT ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Table structure for table `consumption_movement`
+--
+
+DROP TABLE IF EXISTS `consumption_movement`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `consumption_movement` (
+  `id` int NOT NULL,
+  `movement_type` enum('consumption') NOT NULL DEFAULT 'consumption',
+  `batch_id` int NOT NULL,
+  `cost` int NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `id` (`id`,`movement_type`),
+  KEY `batch_id` (`batch_id`),
+  CONSTRAINT `consumption_movement_ibfk_1` FOREIGN KEY (`id`, `movement_type`) REFERENCES `stock_movement` (`id`, `movement_type`),
+  CONSTRAINT `consumption_movement_ibfk_2` FOREIGN KEY (`batch_id`) REFERENCES `batch` (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Table structure for table `feeding`
+--
+
+DROP TABLE IF EXISTS `feeding`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `feeding` (
+  `starter_id` int NOT NULL,
+  `temp` decimal(4,1) DEFAULT NULL,
+  `peaktime` datetime DEFAULT NULL,
+  `qty_added_g` int DEFAULT NULL,
+  `feed_time` datetime NOT NULL,
+  PRIMARY KEY (`starter_id`,`feed_time`),
+  KEY `fk1_idx` (`starter_id`),
+  CONSTRAINT `fk1` FOREIGN KEY (`starter_id`) REFERENCES `starter` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Table structure for table `ingredient`
+--
+
+DROP TABLE IF EXISTS `ingredient`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `ingredient` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `name` varchar(80) NOT NULL,
+  `unit` varchar(5) NOT NULL,
+  `reorder` decimal(8,2) NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_ingredient_name` (`name`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Table structure for table `restock_movement`
+--
+
+DROP TABLE IF EXISTS `restock_movement`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `restock_movement` (
+  `id` int NOT NULL,
+  `movement_type` enum('restock') NOT NULL DEFAULT 'restock',
+  `reason` varchar(45) DEFAULT NULL,
+  PRIMARY KEY (`id`),
+  KEY `id` (`id`,`movement_type`),
+  CONSTRAINT `restock_movement_ibfk_1` FOREIGN KEY (`id`, `movement_type`) REFERENCES `stock_movement` (`id`, `movement_type`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Table structure for table `starter`
+--
+
+DROP TABLE IF EXISTS `starter`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `starter` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `name` varchar(45) NOT NULL,
+  `flour_type` varchar(45) NOT NULL,
+  `hydration` int NOT NULL,
+  `born` date NOT NULL,
+  `min_weight_g` int NOT NULL,
+  PRIMARY KEY (`id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Table structure for table `stock_movement`
+--
+
+DROP TABLE IF EXISTS `stock_movement`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `stock_movement` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `ingredient_id` int NOT NULL,
+  `movement_date` datetime NOT NULL,
+  `qty` decimal(8,2) NOT NULL,
+  `movement_type` enum('restock','consumption') NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `id` (`id`,`movement_type`),
+  KEY `ingredient_id` (`ingredient_id`),
+  CONSTRAINT `stock_movement_ibfk_1` FOREIGN KEY (`ingredient_id`) REFERENCES `ingredient` (`id`),
+  CONSTRAINT `stock_movement_chk_1` CHECK ((`qty` > 0))
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
+DELIMITER ;;
+/*!50003 CREATE*/ /*!50017 DEFINER=`root`@`localhost`*/ /*!50003 TRIGGER `trg_stock_no_negative` BEFORE INSERT ON `stock_movement` FOR EACH ROW BEGIN
+  DECLARE v_stock DECIMAL(10,2);
+
+  IF NEW.movement_type = 'consumption' THEN
+    SELECT COALESCE(SUM(CASE WHEN movement_type = 'restock' THEN qty ELSE -qty END), 0)
+      INTO v_stock
+      FROM stock_movement
+     WHERE ingredient_id = NEW.ingredient_id;
+
+    IF NEW.qty > v_stock THEN
+      SIGNAL SQLSTATE '45000'
+        SET MESSAGE_TEXT = 'Insufficient stock for this ingredient';
+    END IF;
+  END IF;
+END */;;
+DELIMITER ;
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+
+--
+-- Table structure for table `user`
+--
+
+DROP TABLE IF EXISTS `user`;
+/*!40101 SET @saved_cs_client     = @@character_set_client */;
+/*!50503 SET character_set_client = utf8mb4 */;
+CREATE TABLE `user` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `username` varchar(50) NOT NULL,
+  `password_hash` varchar(255) NOT NULL,
+  `role` enum('developer','admin','user') NOT NULL DEFAULT 'user',
+  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uq_user_username` (`username`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
+/*!40101 SET character_set_client = @saved_cs_client */;
+
+--
+-- Dumping routines for database 'sourdough'
+--
+/*!50003 DROP PROCEDURE IF EXISTS `sp_add_batch_with_consumption` */;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
+DELIMITER ;;
+CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_add_batch_with_consumption`(
+  IN  p_starter_id    INT,
+  IN  p_feeding_time  DATETIME,
+  IN  p_qty_removed_g INT,
+  IN  p_loaf_count    INT,
+  IN  p_items         JSON,   -- [{"ingredient_id":1,"qty":500,"cost":20}, ...]
+  OUT p_batch_id      INT
+)
+BEGIN
+  DECLARE i INT DEFAULT 0;
+  DECLARE n INT;
+  DECLARE v_ing INT;
+  DECLARE v_qty DECIMAL(8,2);
+  DECLARE v_cost INT;
+  DECLARE v_mid INT;
+
+  DECLARE EXIT HANDLER FOR SQLEXCEPTION
+  BEGIN
+    ROLLBACK;
+    RESIGNAL;
+  END;
+
+  SET n = JSON_LENGTH(p_items);
+
+  START TRANSACTION;
+    INSERT INTO batch (starter_id, feeding_time, qty_removed_g, loaf_count)
+    VALUES (p_starter_id, p_feeding_time, p_qty_removed_g, p_loaf_count);
+    SET p_batch_id = LAST_INSERT_ID();
+
+    WHILE i < n DO
+      SET v_ing  = JSON_EXTRACT(p_items, CONCAT('$[', i, '].ingredient_id'));
+      SET v_qty  = JSON_EXTRACT(p_items, CONCAT('$[', i, '].qty'));
+      SET v_cost = JSON_EXTRACT(p_items, CONCAT('$[', i, '].cost'));
+
+      INSERT INTO stock_movement (ingredient_id, movement_date, qty, movement_type)
+      VALUES (v_ing, NOW(), v_qty, 'consumption');   -- trigger checks stock here
+      SET v_mid = LAST_INSERT_ID();
+
+      INSERT INTO consumption_movement (id, batch_id, cost)
+      VALUES (v_mid, p_batch_id, v_cost);
+
+      SET i = i + 1;
+    END WHILE;
+  COMMIT;
+END ;;
+DELIMITER ;
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!50003 DROP PROCEDURE IF EXISTS `sp_record_restock` */;
+/*!50003 SET @saved_cs_client      = @@character_set_client */ ;
+/*!50003 SET @saved_cs_results     = @@character_set_results */ ;
+/*!50003 SET @saved_col_connection = @@collation_connection */ ;
+/*!50003 SET character_set_client  = utf8mb4 */ ;
+/*!50003 SET character_set_results = utf8mb4 */ ;
+/*!50003 SET collation_connection  = utf8mb4_0900_ai_ci */ ;
+/*!50003 SET @saved_sql_mode       = @@sql_mode */ ;
+/*!50003 SET sql_mode              = 'ONLY_FULL_GROUP_BY,STRICT_TRANS_TABLES,NO_ZERO_IN_DATE,NO_ZERO_DATE,ERROR_FOR_DIVISION_BY_ZERO,NO_ENGINE_SUBSTITUTION' */ ;
+DELIMITER ;;
+CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_record_restock`(
+  IN p_ingredient_id INT,
+  IN p_qty DECIMAL(8,2),
+  IN p_reason VARCHAR(45)
+)
+BEGIN
+  DECLARE EXIT HANDLER FOR SQLEXCEPTION
+  BEGIN
+    ROLLBACK;
+    RESIGNAL;
+  END;
+
+  START TRANSACTION;
+    INSERT INTO stock_movement (ingredient_id, movement_date, qty, movement_type)
+    VALUES (p_ingredient_id, NOW(), p_qty, 'restock');
+
+    INSERT INTO restock_movement (id, reason)
+    VALUES (LAST_INSERT_ID(), p_reason);
+  COMMIT;
+END ;;
+DELIMITER ;
+/*!50003 SET sql_mode              = @saved_sql_mode */ ;
+/*!50003 SET character_set_client  = @saved_cs_client */ ;
+/*!50003 SET character_set_results = @saved_cs_results */ ;
+/*!50003 SET collation_connection  = @saved_col_connection */ ;
+/*!40103 SET TIME_ZONE=@OLD_TIME_ZONE */;
+
+/*!40101 SET SQL_MODE=@OLD_SQL_MODE */;
+/*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;
+/*!40014 SET UNIQUE_CHECKS=@OLD_UNIQUE_CHECKS */;
+/*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;
+/*!40101 SET CHARACTER_SET_RESULTS=@OLD_CHARACTER_SET_RESULTS */;
+/*!40101 SET COLLATION_CONNECTION=@OLD_COLLATION_CONNECTION */;
+/*!40111 SET SQL_NOTES=@OLD_SQL_NOTES */;
+
+-- Dump completed on 2026-10-31 21:53:26
