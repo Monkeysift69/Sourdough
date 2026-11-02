@@ -1,10 +1,11 @@
 const router = require('express').Router();
 const c = require('../controllers/batch.controller');
+const { requireLogin } = require('../middleware/auth');
 
-router.get('/batches', c.getAll);
-router.get('/batches/:id', c.getOne);
-router.post('/batches', c.create);
-router.patch('/batches/:id', c.update);
-router.delete('/batches/:id', c.remove);
+router.get('/batches', requireLogin, c.getAll);
+router.get('/batches/:id', requireLogin, c.getOne);
+router.post('/batches', requireLogin, c.create);
+router.patch('/batches/:id', requireLogin, c.update);
+router.delete('/batches/:id', requireLogin, c.remove);
 
 module.exports = router;

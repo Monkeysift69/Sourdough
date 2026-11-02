@@ -1,0 +1,19 @@
+{
+  "name": "sourdough-log",
+  "version": "1.0.0",
+  "description": "CSS325/326 Sourdough Log — Express + MySQL",
+  "main": "app.js",
+  "scripts": {
+    "start": "node app.js",
+    "seed": "node seed.js",
+    "fix-db": "node seed.js sql/fix_movement_enum.sql",
+    "set-password": "node set-password.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "mysql2": "^3.11.0"
+  }
+}

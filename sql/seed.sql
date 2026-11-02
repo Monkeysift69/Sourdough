@@ -1,0 +1,125 @@
+-- =====================================================================
+-- seed.sql — sample data for the Sourdough Log
+-- Run AFTER schema.sql:   npm run seed   (or open it in MySQL Workbench and run it)
+-- Running it again wipes the tables and starts over.
+-- Times are relative to NOW(), so READY / HUNGRY / RISING are live every time you seed.
+--
+-- Demo logins:  dev / dev123   admin / admin123   baker / baker123
+-- =====================================================================
+USE sourdough;
+
+-- empty every table (children first) and restart the AUTO_INCREMENT counters
+SET FOREIGN_KEY_CHECKS = 0;
+TRUNCATE TABLE consumption_movement;
+TRUNCATE TABLE restock_movement;
+TRUNCATE TABLE stock_movement;
+TRUNCATE TABLE batch;
+TRUNCATE TABLE feeding;
+TRUNCATE TABLE starter;
+TRUNCATE TABLE ingredient;
+TRUNCATE TABLE user;
+SET FOREIGN_KEY_CHECKS = 1;
+
+-- one fixed "now" (to the minute) so every row below lines up exactly
+SET @now = STR_TO_DATE(DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:00'), '%Y-%m-%d %H:%i:%s');
+
+-- ---------------------------------------------------------------------
+-- user  (password_hash = bcrypt, cost 10)
+-- ---------------------------------------------------------------------
+INSERT INTO user (id, username, password_hash, role) VALUES
+  (1, 'dev',   '$2a$10$fPL29hpffRZGtlKIQkH/kOPlo/xAPAo4rQ2t/kJeDXTOPPjy6WDmC', 'developer'),
+  (2, 'admin', '$2a$10$4QEkxJgI2RJN7KVlKmoK4esmcGmWQwzuZy4GbKuE6Dyugnn4X6r.e', 'admin'),
+  (3, 'baker', '$2a$10$X/AxfiW6YdrXCac.twuJMOgE0ALRsf4Yn6EZYbw5SVcor8M.cin.W', 'user');
+
+-- ---------------------------------------------------------------------
+-- starter
+-- ---------------------------------------------------------------------
+INSERT INTO starter (id, name, flour_type, hydration, born, min_weight_g) VALUES
+  (1, 'San Francisco Mother Levain', 'Unbleached Bread Flour',  100, DATE(@now - INTERVAL 306 DAY), 200),
+  (2, 'Nordic Rye Starter',          'Dark Rye Flour',          100, DATE(@now - INTERVAL 252 DAY), 150),
+  (3, 'Heritage Whole Wheat',        'Stoneground Whole Wheat', 100, DATE(@now - INTERVAL 179 DAY), 150);
+
+-- ---------------------------------------------------------------------
+-- feeding  (weak entity, key = starter_id + feed_time)
+--   starter 1: peaked 30 min ago  -> READY
+--   starter 2: peaked 8 h ago     -> HUNGRY
+--   starter 3: peaks in 4 h       -> RISING
+-- ---------------------------------------------------------------------
+INSERT INTO feeding (starter_id, feed_time, temp, peaktime, qty_added_g) VALUES
+  (1, @now - INTERVAL 30 HOUR,  26.5, @now - INTERVAL 24 HOUR,  300),
+  (2, @now - INTERVAL 28 HOUR,  25.0, @now - INTERVAL 22 HOUR,  200),
+  (2, @now - INTERVAL 14 HOUR,  25.0, @now - INTERVAL 8 HOUR,   250),
+  (1, @now - INTERVAL 6 HOUR,   27.0, @now - INTERVAL 30 MINUTE, 350),
+  (3, @now - INTERVAL 2 HOUR,   24.5, @now + INTERVAL 4 HOUR,   200);
+
+-- ---------------------------------------------------------------------
+-- ingredient
+-- ---------------------------------------------------------------------
+INSERT INTO ingredient (id, name, unit, reorder) VALUES
+  (1, 'High-Protein Bread Flour', 'g',  5000),
+  (2, 'Organic Dark Rye Flour',   'g',  2000),
+  (3, 'Whole Wheat Flour',        'g',  2000),
+  (4, 'Fine Brittany Sea Salt',   'g',  500),
+  (5, 'Filtered Spring Water',    'ml', 5000),
+  (6, 'Toasted Sesame Seeds',     'g',  800);
+
+-- ---------------------------------------------------------------------
+-- stock_movement + restock_movement  (deliveries, 3 days ago)
+-- ---------------------------------------------------------------------
+INSERT INTO stock_movement (id, ingredient_id, movement_date, qty, movement_type) VALUES
+  (1, 1, @now - INTERVAL 72 HOUR, 25000, 'restock'),
+  (2, 2, @now - INTERVAL 72 HOUR, 8000,  'restock'),
+  (3, 3, @now - INTERVAL 72 HOUR, 10000, 'restock'),
+  (4, 4, @now - INTERVAL 72 HOUR, 3000,  'restock'),
+  (5, 5, @now - INTERVAL 72 HOUR, 30000, 'restock'),
+  (6, 6, @now - INTERVAL 72 HOUR, 250,   'restock');
+
+INSERT INTO restock_movement (id, reason) VALUES
+  (1, 'Mill direct delivery - 25 kg bag'),
+  (2, 'Organic rye shipment'),
+  (3, 'Stoneground whole wheat 10 kg'),
+  (4, 'French sea salt 3 kg tub'),
+  (5, 'Filtered water reservoir fill'),
+  (6, 'Topping seeds - partial bag');
+
+-- ---------------------------------------------------------------------
+-- batch
+--   101: baked yesterday (all four stages done), made from starter 1's older feeding
+--   102: in bulk ferment now, made from starter 2's latest feeding
+-- feeding_time must match a feeding row exactly (fk_batch_feeding)
+-- ---------------------------------------------------------------------
+INSERT INTO batch (id, starter_id, feeding_time, qty_removed_g, loaf_count,
+                   mix_time, bulk_ferment_start, bulk_ferment_end, cold_proof_start, cold_proof_end) VALUES
+  (101, 1, @now - INTERVAL 30 HOUR, 240, 12,
+        @now - INTERVAL 23 HOUR, @now - INTERVAL 1350 MINUTE, @now - INTERVAL 1050 MINUTE,
+        @now - INTERVAL 1050 MINUTE, @now - INTERVAL 5 HOUR),
+  (102, 2, @now - INTERVAL 14 HOUR, 180, 8,
+        @now - INTERVAL 7 HOUR, @now - INTERVAL 390 MINUTE, NULL, NULL, NULL);
+
+-- ---------------------------------------------------------------------
+-- stock_movement + consumption_movement  (what each batch used)
+-- trg_stock_no_negative checks each row against the restocks above
+-- ---------------------------------------------------------------------
+INSERT INTO stock_movement (id, ingredient_id, movement_date, qty, movement_type) VALUES
+  (7,  1, @now - INTERVAL 23 HOUR, 5400, 'consumption'),
+  (8,  3, @now - INTERVAL 23 HOUR, 600,  'consumption'),
+  (9,  5, @now - INTERVAL 23 HOUR, 4500, 'consumption'),
+  (10, 4, @now - INTERVAL 23 HOUR, 120,  'consumption'),
+  (11, 2, @now - INTERVAL 7 HOUR,  2800, 'consumption'),
+  (12, 1, @now - INTERVAL 7 HOUR,  1200, 'consumption'),
+  (13, 5, @now - INTERVAL 7 HOUR,  3200, 'consumption'),
+  (14, 4, @now - INTERVAL 7 HOUR,  80,   'consumption');
+
+INSERT INTO consumption_movement (id, batch_id, cost) VALUES
+  (7, 101, 189), (8, 101, 27), (9, 101, 5), (10, 101, 18),
+  (11, 102, 168), (12, 102, 42), (13, 102, 3), (14, 102, 12);
+
+-- ---------------------------------------------------------------------
+-- check
+-- ---------------------------------------------------------------------
+SELECT 'starter' AS t, COUNT(*) AS n FROM starter
+UNION ALL SELECT 'feeding', COUNT(*) FROM feeding
+UNION ALL SELECT 'batch', COUNT(*) FROM batch
+UNION ALL SELECT 'ingredient', COUNT(*) FROM ingredient
+UNION ALL SELECT 'stock_movement', COUNT(*) FROM stock_movement
+UNION ALL SELECT 'user', COUNT(*) FROM user;

@@ -1,7 +1,8 @@
 const router = require('express').Router();
 const c = require('../controllers/stock.controller');
+const { requireLogin, requireRole } = require('../middleware/auth');
 
-router.get('/stock-movements', c.list);
-router.post('/stock-movements/restock', c.restock);
+router.get('/stock-movements', requireLogin, c.list);
+router.post('/stock-movements/restock', requireRole('admin', 'developer'), c.restock);
 
 module.exports = router;

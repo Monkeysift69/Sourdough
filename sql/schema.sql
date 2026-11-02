@@ -50,14 +50,15 @@ DROP TABLE IF EXISTS `consumption_movement`;
 /*!50503 SET character_set_client = utf8mb4 */;
 CREATE TABLE `consumption_movement` (
   `id` int NOT NULL,
-  `movement_type` enum('consumption') NOT NULL DEFAULT 'consumption',
+  `movement_type` enum('restock','consumption') NOT NULL DEFAULT 'consumption',
   `batch_id` int NOT NULL,
   `cost` int NOT NULL,
   PRIMARY KEY (`id`),
   KEY `id` (`id`,`movement_type`),
   KEY `batch_id` (`batch_id`),
   CONSTRAINT `consumption_movement_ibfk_1` FOREIGN KEY (`id`, `movement_type`) REFERENCES `stock_movement` (`id`, `movement_type`),
-  CONSTRAINT `consumption_movement_ibfk_2` FOREIGN KEY (`batch_id`) REFERENCES `batch` (`id`)
+  CONSTRAINT `consumption_movement_ibfk_2` FOREIGN KEY (`batch_id`) REFERENCES `batch` (`id`),
+  CONSTRAINT `chk_cm_type` CHECK ((`movement_type` = 'consumption'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
@@ -106,11 +107,12 @@ DROP TABLE IF EXISTS `restock_movement`;
 /*!50503 SET character_set_client = utf8mb4 */;
 CREATE TABLE `restock_movement` (
   `id` int NOT NULL,
-  `movement_type` enum('restock') NOT NULL DEFAULT 'restock',
+  `movement_type` enum('restock','consumption') NOT NULL DEFAULT 'restock',
   `reason` varchar(45) DEFAULT NULL,
   PRIMARY KEY (`id`),
   KEY `id` (`id`,`movement_type`),
-  CONSTRAINT `restock_movement_ibfk_1` FOREIGN KEY (`id`, `movement_type`) REFERENCES `stock_movement` (`id`, `movement_type`)
+  CONSTRAINT `restock_movement_ibfk_1` FOREIGN KEY (`id`, `movement_type`) REFERENCES `stock_movement` (`id`, `movement_type`),
+  CONSTRAINT `chk_rm_type` CHECK ((`movement_type` = 'restock'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
