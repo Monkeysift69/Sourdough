@@ -4,10 +4,7 @@
   "description": "CSS325/326 Sourdough Log — Express + MySQL",
   "main": "app.js",
   "scripts": {
-    "start": "node app.js",
-    "seed": "node seed.js",
-    "fix-db": "node seed.js sql/fix_movement_enum.sql",
-    "set-password": "node set-password.js"
+    "start": "node app.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

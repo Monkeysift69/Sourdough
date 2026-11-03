@@ -4,21 +4,11 @@ require('dotenv').config();
 
 const app = express();
 
-// Behind Cloudflare Tunnel: trust the proxy so secure cookies work over HTTPS
-app.set('trust proxy', 1);
-app.disable('x-powered-by');            // don't advertise Express in every response
-
 app.use(express.json());                 // lets you read req.body
 app.use(session({
-  secret: process.env.SESSION_SECRET || 'change-this-secret',
+  secret: process.env.SESSION_SECRET,    // from .env, never written in the code
   resave: false,
-  saveUninitialized: false,
-  cookie: {
-    httpOnly: true,
-    sameSite: 'lax',
-    secure: process.env.NODE_ENV === 'production',   // HTTPS-only cookie on maxgunit.org
-    maxAge: 1000 * 60 * 60 * 8                        // 8 hours
-  }
+  saveUninitialized: false
 }));
 app.use(express.static('public'));       // serves public/index.html
 

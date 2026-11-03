@@ -35,9 +35,12 @@ CREATE TABLE `batch` (
   `qty_removed_g` int NOT NULL,
   `loaf_count` int NOT NULL,
   `starter_id` int NOT NULL,
+  `user_id` int NOT NULL,
   PRIMARY KEY (`id`),
   KEY `fk_batch_feeding` (`starter_id`,`feeding_time`),
-  CONSTRAINT `fk_batch_feeding` FOREIGN KEY (`starter_id`, `feeding_time`) REFERENCES `feeding` (`starter_id`, `feed_time`) ON DELETE RESTRICT ON UPDATE CASCADE
+  KEY `fk_batch_user` (`user_id`),
+  CONSTRAINT `fk_batch_feeding` FOREIGN KEY (`starter_id`, `feeding_time`) REFERENCES `feeding` (`starter_id`, `feed_time`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `fk_batch_user` FOREIGN KEY (`user_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
@@ -51,13 +54,10 @@ DROP TABLE IF EXISTS `consumption_movement`;
 CREATE TABLE `consumption_movement` (
   `id` int NOT NULL,
   `movement_type` enum('restock','consumption') NOT NULL DEFAULT 'consumption',
-  `batch_id` int NOT NULL,
-  `cost` int NOT NULL,
+  `reason` varchar(45) NOT NULL,
   PRIMARY KEY (`id`),
   KEY `id` (`id`,`movement_type`),
-  KEY `batch_id` (`batch_id`),
   CONSTRAINT `consumption_movement_ibfk_1` FOREIGN KEY (`id`, `movement_type`) REFERENCES `stock_movement` (`id`, `movement_type`),
-  CONSTRAINT `consumption_movement_ibfk_2` FOREIGN KEY (`batch_id`) REFERENCES `batch` (`id`),
   CONSTRAINT `chk_cm_type` CHECK ((`movement_type` = 'consumption'))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
@@ -75,9 +75,12 @@ CREATE TABLE `feeding` (
   `peaktime` datetime DEFAULT NULL,
   `qty_added_g` int DEFAULT NULL,
   `feed_time` datetime NOT NULL,
+  `user_id` int NOT NULL,
   PRIMARY KEY (`starter_id`,`feed_time`),
   KEY `fk1_idx` (`starter_id`),
-  CONSTRAINT `fk1` FOREIGN KEY (`starter_id`) REFERENCES `starter` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
+  KEY `fk_feeding_user` (`user_id`),
+  CONSTRAINT `fk1` FOREIGN KEY (`starter_id`) REFERENCES `starter` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `fk_feeding_user` FOREIGN KEY (`user_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
@@ -108,11 +111,12 @@ DROP TABLE IF EXISTS `restock_movement`;
 CREATE TABLE `restock_movement` (
   `id` int NOT NULL,
   `movement_type` enum('restock','consumption') NOT NULL DEFAULT 'restock',
-  `reason` varchar(45) DEFAULT NULL,
+  `cost` decimal(10,2) NOT NULL,
   PRIMARY KEY (`id`),
   KEY `id` (`id`,`movement_type`),
   CONSTRAINT `restock_movement_ibfk_1` FOREIGN KEY (`id`, `movement_type`) REFERENCES `stock_movement` (`id`, `movement_type`),
-  CONSTRAINT `chk_rm_type` CHECK ((`movement_type` = 'restock'))
+  CONSTRAINT `chk_rm_type` CHECK ((`movement_type` = 'restock')),
+  CONSTRAINT `chk_rm_cost` CHECK ((`cost` >= 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
@@ -147,10 +151,16 @@ CREATE TABLE `stock_movement` (
   `movement_date` datetime NOT NULL,
   `qty` decimal(8,2) NOT NULL,
   `movement_type` enum('restock','consumption') NOT NULL,
+  `batch_id` int DEFAULT NULL,
+  `user_id` int NOT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `id` (`id`,`movement_type`),
   KEY `ingredient_id` (`ingredient_id`),
+  KEY `fk_stock_batch` (`batch_id`),
+  KEY `fk_stock_user` (`user_id`),
   CONSTRAINT `stock_movement_ibfk_1` FOREIGN KEY (`ingredient_id`) REFERENCES `ingredient` (`id`),
+  CONSTRAINT `fk_stock_batch` FOREIGN KEY (`batch_id`) REFERENCES `batch` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
+  CONSTRAINT `fk_stock_user` FOREIGN KEY (`user_id`) REFERENCES `user` (`id`) ON DELETE RESTRICT ON UPDATE CASCADE,
   CONSTRAINT `stock_movement_chk_1` CHECK ((`qty` > 0))
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_0900_ai_ci;
 /*!40101 SET character_set_client = @saved_cs_client */;
@@ -220,7 +230,8 @@ CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_add_batch_with_consumption`(
   IN  p_feeding_time  DATETIME,
   IN  p_qty_removed_g INT,
   IN  p_loaf_count    INT,
-  IN  p_items         JSON,   -- [{"ingredient_id":1,"qty":500,"cost":20}, ...]
+  IN  p_items         JSON,   -- [{"ingredient_id":1,"qty":500}, ...]
+  IN  p_user_id       INT,    -- who is recording the batch (from the login session)
   OUT p_batch_id      INT
 )
 BEGIN
@@ -228,7 +239,6 @@ BEGIN
   DECLARE n INT;
   DECLARE v_ing INT;
   DECLARE v_qty DECIMAL(8,2);
-  DECLARE v_cost INT;
   DECLARE v_mid INT;
 
   DECLARE EXIT HANDLER FOR SQLEXCEPTION
@@ -240,21 +250,20 @@ BEGIN
   SET n = JSON_LENGTH(p_items);
 
   START TRANSACTION;
-    INSERT INTO batch (starter_id, feeding_time, qty_removed_g, loaf_count)
-    VALUES (p_starter_id, p_feeding_time, p_qty_removed_g, p_loaf_count);
+    INSERT INTO batch (starter_id, feeding_time, qty_removed_g, loaf_count, user_id)
+    VALUES (p_starter_id, p_feeding_time, p_qty_removed_g, p_loaf_count, p_user_id);
     SET p_batch_id = LAST_INSERT_ID();
 
     WHILE i < n DO
       SET v_ing  = JSON_EXTRACT(p_items, CONCAT('$[', i, '].ingredient_id'));
       SET v_qty  = JSON_EXTRACT(p_items, CONCAT('$[', i, '].qty'));
-      SET v_cost = JSON_EXTRACT(p_items, CONCAT('$[', i, '].cost'));
 
-      INSERT INTO stock_movement (ingredient_id, movement_date, qty, movement_type)
-      VALUES (v_ing, NOW(), v_qty, 'consumption');   -- trigger checks stock here
+      INSERT INTO stock_movement (ingredient_id, movement_date, qty, movement_type, batch_id, user_id)
+      VALUES (v_ing, NOW(), v_qty, 'consumption', p_batch_id, p_user_id);   -- trigger checks stock here
       SET v_mid = LAST_INSERT_ID();
 
-      INSERT INTO consumption_movement (id, batch_id, cost)
-      VALUES (v_mid, p_batch_id, v_cost);
+      INSERT INTO consumption_movement (id, reason)
+      VALUES (v_mid, 'Used in bake');
 
       SET i = i + 1;
     END WHILE;
@@ -278,7 +287,8 @@ DELIMITER ;;
 CREATE DEFINER=`root`@`localhost` PROCEDURE `sp_record_restock`(
   IN p_ingredient_id INT,
   IN p_qty DECIMAL(8,2),
-  IN p_reason VARCHAR(45)
+  IN p_cost DECIMAL(10,2),     -- total paid for this delivery
+  IN p_user_id INT
 )
 BEGIN
   DECLARE EXIT HANDLER FOR SQLEXCEPTION
@@ -288,11 +298,11 @@ BEGIN
   END;
 
   START TRANSACTION;
-    INSERT INTO stock_movement (ingredient_id, movement_date, qty, movement_type)
-    VALUES (p_ingredient_id, NOW(), p_qty, 'restock');
+    INSERT INTO stock_movement (ingredient_id, movement_date, qty, movement_type, user_id)
+    VALUES (p_ingredient_id, NOW(), p_qty, 'restock', p_user_id);
 
-    INSERT INTO restock_movement (id, reason)
-    VALUES (LAST_INSERT_ID(), p_reason);
+    INSERT INTO restock_movement (id, cost)
+    VALUES (LAST_INSERT_ID(), p_cost);
   COMMIT;
 END ;;
 DELIMITER ;

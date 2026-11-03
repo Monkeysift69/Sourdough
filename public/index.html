@@ -34,7 +34,6 @@
   };
 })();
 </script>
-<script src="https://unpkg.com/lucide@0.460.0/dist/umd/lucide.min.js"></script>
 
 <style type="text/tailwindcss">
 @layer components {
@@ -73,9 +72,6 @@
   html, body { -webkit-font-smoothing: antialiased; }
   body { background:#F4EFE6; color:#2A211B; font-feature-settings: "tnum" 0; }
   .tnum { font-variant-numeric: tabular-nums; }
-  i[data-lucide] { display:inline-block; width:15px; height:15px; }
-  svg.lucide { width:15px; height:15px; flex-shrink:0; stroke-width:1.6; }
-  svg.lucide.w-3 { width:12px; height:12px; } svg.lucide.w-5 { width:18px; height:18px; }
   .nav-a.on::before { content:''; display:inline-block; width:14px; height:1.5px; background:#8B4A2B; vertical-align:middle; margin-right:8px; margin-left:-22px; }
   .modal-panel { animation: pop .16s ease-out; }
   @keyframes pop { from { opacity:0; transform: translateY(6px); } to { opacity:1; transform:none; } }
@@ -143,7 +139,7 @@
           <p class="text-[10px] uppercase tracking-[.22em] text-ink/45">The baker's logbook</p>
           <p class="h-serif text-[26px] leading-tight mt-1">Sourdough<br>Log</p>
         </div>
-        <button type="button" class="btn-icon md:hidden -mr-2" data-action="sidebar-close" aria-label="Close menu"><i data-lucide="x"></i></button>
+        <button type="button" class="btn-icon md:hidden -mr-2" data-action="sidebar-close" aria-label="Close menu">×</button>
       </div>
       <nav id="sideNav" class="mt-10"></nav>
     </div>
@@ -174,7 +170,6 @@
 /* =====================================================================
    1. CONSTANTS
    ===================================================================== */
-const SS_TAB = 'sourdough_log_tab';
 const H = 3600e3, D = 24 * H;
 const PEAK_WINDOW_H = 4;           // a starter counts as "Ready" for 4h after its peak time
 const CURRENCY = '฿';
@@ -187,16 +182,20 @@ const PERMS = {
   'batch.write':    ['developer','admin','user'],
   'restock':        ['developer','admin'],
   'reorder.update': ['developer','admin'],
+  'ingredient.write': ['developer','admin'],
+  'ledger.view':    ['developer','admin'],
+  'waste':          ['developer','admin'],
   'user.manage':    ['developer'],
+  'schema.view':    ['developer'],
 };
+const ROLE_VIEW = { user: "Baker's view", admin: 'Admin view', developer: 'Developer view' };
 const PERM_LABEL = {
   'starter.write':'Create / delete starters', 'feeding.write':'Log feedings',
   'batch.write':'Start / advance / delete bakes', 'restock':'Record deliveries',
-  'reorder.update':'Edit reorder level', 'user.manage':'Manage bakers',
+  'reorder.update':'Edit reorder level', 'ingredient.write':'Add ingredients',
+  'ledger.view':'See the stock ledger', 'waste':'Record waste', 'user.manage':'Manage bakers', 'schema.view':'Show the schema',
 };
 const STAGES = ['Mixing','Bulk Ferment','Cold Proof','Baked'];
-// Client-side cost hint only (not a DB column) — used to pre-fill consumption cost (฿ per g/ml).
-const PRICE_HINT = { 1:0.035, 2:0.06, 3:0.045, 4:0.15, 5:0.001, 6:0.25 };
 
 /* =====================================================================
    2. UTILITIES
@@ -217,7 +216,6 @@ const fmtQ = n => Number(n).toLocaleString('en-US', { maximumFractionDigits: 2 }
 const fmtMoney = n => CURRENCY + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const ageDays = born => Math.max(0, Math.floor((Date.now() - parse(born)) / D));
 function dur(ms) { const m = Math.round(Math.abs(ms) / 60000); if (m < 60) return `${m}m`; const h = Math.floor(m / 60), r = m % 60; return r ? `${h}h ${r}m` : `${h}h`; }
-const icons = () => { try { window.lucide && lucide.createIcons(); } catch (e) {} };
 const num = v => (v === '' || v == null ? null : Number(v));
 
 /* =====================================================================
@@ -266,9 +264,9 @@ async function loadAll() {
     })),
     batch: batches.map(b => ({ ...b, mix_time: b.mix_time || b.feeding_time, loaf_count: Number(b.loaf_count), qty_removed_g: Number(b.qty_removed_g) })),
     ingredient: ingredients.map(i => ({ ...i, reorder: num(i.reorder) })),
-    stock_movement: moves.map(m => ({ id: m.id, ingredient_id: m.ingredient_id, movement_date: m.movement_date, qty: Number(m.qty), movement_type: m.movement_type })),
-    restock_movement: moves.filter(m => m.movement_type === 'restock').map(m => ({ id: m.id, reason: m.reason })),
-    consumption_movement: moves.filter(m => m.movement_type === 'consumption').map(m => ({ id: m.id, batch_id: m.batch_id, cost: Number(m.cost) })),
+    stock_movement: moves.map(m => ({ id: m.id, ingredient_id: m.ingredient_id, movement_date: m.movement_date, qty: Number(m.qty), movement_type: m.movement_type, batch_id: m.batch_id })),
+    restock_movement: moves.filter(m => m.movement_type === 'restock').map(m => ({ id: m.id, cost: num(m.cost) })),
+    consumption_movement: moves.filter(m => m.movement_type === 'consumption').map(m => ({ id: m.id, reason: m.reason })),
     user: users,
   };
 }
@@ -279,6 +277,11 @@ const createStarter = f => api('POST', '/starters', {
   born: f.born || toSqlDate(Date.now()), min_weight_g: num(f.min_weight_g),
 }).then(r => r.id);
 
+const getStarter = id => api('GET', `/starters/${id}`);
+const updateStarter = (id, f) => api('PUT', `/starters/${id}`, {
+  name: f.name.trim(), flour_type: f.flour_type.trim(), hydration: num(f.hydration),
+  born: f.born, min_weight_g: num(f.min_weight_g),
+});
 const deleteStarter = id => api('DELETE', `/starters/${id}`);
 
 const createFeeding = f => api('POST', `/starters/${Number(f.starter_id)}/feedings`, {
@@ -288,7 +291,7 @@ const createFeeding = f => api('POST', `/starters/${Number(f.starter_id)}/feedin
 
 const spAddBatchWithConsumption = (starter_id, feeding_time, qty_removed_g, loaf_count, items) => api('POST', '/batches', {
   starter_id, feeding_time, qty_removed_g: num(qty_removed_g), loaf_count: num(loaf_count),
-  items: items.map(it => ({ ingredient_id: num(it.ingredient_id), qty: num(it.qty), cost: Math.round(num(it.cost) || 0) })),
+  items: items.map(it => ({ ingredient_id: num(it.ingredient_id), qty: num(it.qty) })),
 }).then(r => r.id);
 
 async function advanceBatch(id) {
@@ -300,8 +303,12 @@ async function advanceBatch(id) {
 
 const deleteBatch = id => api('DELETE', `/batches/${id}`);
 
-const spRecordRestock = (ingredient_id, qty, reason) =>
-  api('POST', '/stock-movements/restock', { ingredient_id, qty: num(qty), reason: String(reason || '').trim() });
+const spRecordRestock = (ingredient_id, qty, cost) =>
+  api('POST', '/stock-movements/restock', { ingredient_id, qty: num(qty), cost: num(cost) });
+const recordWaste = (ingredient_id, qty, reason) =>
+  api('POST', '/stock-movements/waste', { ingredient_id, qty: num(qty), reason: String(reason || '').trim() });
+
+const createIngredient = f => api('POST', '/ingredients', { name: String(f.name || '').trim(), unit: String(f.unit || '').trim(), reorder: num(f.reorder) });
 
 function updateReorder(id, value) {
   const i = db.ingredient.find(x => x.id === id);
@@ -415,7 +422,7 @@ function openModal({ title, subtitle = '', body, submitLabel = 'Save', submitCla
     <form class="modal-panel relative bg-paper w-full ${wide ? 'sm:max-w-3xl' : 'sm:max-w-lg'} max-h-[94vh] flex flex-col border border-ink/20 border-t-[3px] border-t-accent" novalidate>
       <div class="flex items-start justify-between gap-3 px-6 pt-6 pb-2">
         <div class="min-w-0"><h3 class="h-serif text-2xl leading-tight">${title}</h3>${subtitle ? `<p class="schema-only text-[11px] font-mono text-ink/50 mt-1.5 break-words">${subtitle}</p>` : ''}</div>
-        <button type="button" class="btn-icon -mr-2" data-close aria-label="Close"><i data-lucide="x"></i></button>
+        <button type="button" class="btn-icon -mr-2" data-close aria-label="Close">×</button>
       </div>
       <div class="px-6 pb-5 pt-3 overflow-y-auto scroll-thin flex-1">${body}
         <p class="form-error hidden mt-4 text-sm text-accent"></p></div>
@@ -438,7 +445,6 @@ function openModal({ title, subtitle = '', body, submitLabel = 'Save', submitCla
     if (done) close();
   });
   onMount && onMount(root, close);
-  icons();
   setTimeout(() => $('input:not([type=hidden]):not([readonly]), select, textarea', form)?.focus(), 60);
   return { root, close };
 }
@@ -451,15 +457,13 @@ function confirmModal({ title, message, confirmLabel = 'Confirm', danger = true,
 /* =====================================================================
    8. RENDERING
    ===================================================================== */
-let activeTab = sessionStorage.getItem(SS_TAB) || 'starters';
+let activeTab = 'starters';
 let batchFilter = 'all', ledgerFilter = 'all';
 let sidebarOpen = false;
 const calc = { loaves: 15, per: { 1: 450, 5: 320, 4: 10 } };
 
-const LS_SCHEMA = 'sourdough_log_show_schema';
 let showSchema = false;
-try { showSchema = localStorage.getItem(LS_SCHEMA) === '1'; } catch (e) {}
-function applySchema() { document.body.classList.toggle('show-schema', showSchema); }
+function applySchema() { document.body.classList.toggle('show-schema', showSchema && can('schema.view')); }
 
 const TABS = [
   { id: 'starters', label: 'Starters', title: 'The jars' },
@@ -492,14 +496,13 @@ function renderAll() {
   const u = me();
   $('#loginView').classList.toggle('hidden', !!u);
   $('#appView').classList.toggle('hidden', !u);
-  if (!u) { icons(); return; }
+  if (!u) return;
   const t = TABS.find(x => x.id === activeTab);
   if (!t || (t.perm && !can(t.perm))) activeTab = 'starters';
   renderSidebar();
   const view = { starters: viewStarters, batches: viewBatches, stock: viewStock, users: viewUsers }[activeTab];
   $('#main').innerHTML = pageHead() + view();
   if (activeTab === 'stock') renderCalcResult();
-  icons();
 }
 
 /* ---------- Sidebar: the only navigation ---------- */
@@ -518,13 +521,13 @@ function renderSidebar() {
       <p class="mt-1 font-mono">Express API → MySQL <span class="text-ink/70">sourdough</span></p>
       <p class="font-mono">session role: ${esc(me().role)}</p>
     </div>`;
-  $('#sideFoot').innerHTML = `
+  $('#sideFoot').innerHTML = `${can('schema.view') ? `
     <label class="flex items-center gap-2.5 cursor-pointer select-none py-1">
       <input type="checkbox" id="schemaToggle" class="sr-only" ${showSchema ? 'checked' : ''}>
       <span class="w-3.5 h-3.5 border border-ink/60 grid place-items-center">${showSchema ? '<span class="w-2 h-2 bg-accent"></span>' : ''}</span>
       <span class="text-ink/75">Show schema</span>
-    </label>
-    <div class="rule mt-4 pt-4">
+    </label>` : ''}
+    <div class="${can('schema.view') ? 'rule mt-4 pt-4' : ''}">
       <p class="text-ink/50">Signed in as</p>
       <p class="font-serif text-lg leading-tight">${esc(u.username)} <span class="text-xs font-sans text-ink/50">${esc(u.role)}</span></p>
       <div class="flex gap-4 mt-3"><button type="button" class="link" data-action="logout">Log out</button></div>
@@ -553,7 +556,7 @@ function attentionSentence() {
 function pageHead() {
   const t = TABS.find(x => x.id === activeTab);
   return `<header>
-    <p class="text-[11px] uppercase tracking-[.22em] text-ink/50">${today()}</p>
+    <p class="text-[11px] uppercase tracking-[.22em] text-ink/50">${today()} · <span class="text-accent">${ROLE_VIEW[me().role] || ''}</span></p>
     <h1 class="h-serif text-4xl sm:text-5xl mt-2">${t.title}</h1>
     <p class="font-serif text-lg sm:text-xl leading-relaxed text-ink/85 mt-5 max-w-3xl">${attentionSentence()}</p>
   </header>`;
@@ -630,7 +633,7 @@ function starterEntry(s) {
     ${jarSVG(s, st)}
     <div class="min-w-0 pt-1">
       <span class="stamp ${stampCls}">${st.label === 'Ready' ? 'Ready' : st.label === 'Not fed' ? 'Unfed' : st.label}</span>
-      <h3 class="h-serif text-xl leading-snug mt-3">${esc(s.name)}</h3>
+      <h3 class="h-serif text-xl leading-snug mt-3"><button type="button" class="text-left hover:underline decoration-ink/30 underline-offset-4" data-action="starter-detail" data-id="${s.id}">${esc(s.name)}</button></h3>
       <p class="text-[13px] text-ink/60 mt-1">${esc(s.flour_type)} · ${fmtQ(s.hydration)}% · ${ageDays(s.born)} days old</p>
       <p class="text-[13px] text-ink/80 mt-2">${f ? `Fed ${when(f.feed_time)}${f.temp != null ? ` at ${fmtQ(f.temp)}°C` : ''}.` : 'Never fed.'} ${esc(st.hint)}.</p>
       <p class="text-[13px] mt-1 ${low ? 'text-accent' : 'text-ink/60'}">About ${fmtQ(res)} g in the jar${low ? ` — under the ${fmtQ(s.min_weight_g)} g you keep back` : ''}.</p>
@@ -638,6 +641,7 @@ function starterEntry(s) {
       <div class="flex flex-wrap gap-x-4 gap-y-1 mt-3">
         <button type="button" class="link-accent" data-action="feed" data-id="${s.id}">Feed</button>
         <button type="button" class="link" data-action="bake" data-id="${s.id}">Bake with it</button>
+        <button type="button" class="link" data-action="edit-starter" data-id="${s.id}">Edit</button>
         <button type="button" class="link !text-ink/45" data-action="delete-starter" data-id="${s.id}">Remove</button>
       </div>
     </div>
@@ -659,8 +663,7 @@ function viewBatches() {
 }
 function batchEntry(b) {
   const s = stageOf(b);
-  const items = db.consumption_movement.filter(c => c.batch_id === b.id).map(c => ({ c, m: db.stock_movement.find(m => m.id === c.id) })).filter(x => x.m);
-  const total = items.reduce((a, x) => a + +x.c.cost, 0);
+  const items = db.stock_movement.filter(m => m.batch_id === b.id).map(m => ({ m }));
   const times = [b.mix_time, b.bulk_ferment_start, b.cold_proof_start, b.cold_proof_end];
   const steps = STAGE_DONE.map((name, i) => {
     const done = i <= s, cur = i === s && s < 3;
@@ -675,8 +678,8 @@ function batchEntry(b) {
     <div class="min-w-0">
       <p class="text-[15px]"><span class="font-medium">${b.loaf_count} loaves</span> from <span class="font-serif italic">${esc(starterName(b.starter_id))}</span>, using ${fmtQ(b.qty_removed_g)} g of starter.</p>
       <ol class="flex flex-wrap gap-x-3 gap-y-3 mt-4">${steps}</ol>
-      <p class="text-[13px] text-ink/60 mt-4">${used.length ? `Took ${listOf(used)} — ${fmtMoney(total)} of ingredients.` : 'No ingredients recorded.'}</p>
-      ${schema(`<span class="block mt-1">batch.id ${b.id} · FK feeding (${b.starter_id}, '${esc(b.feeding_time.slice(0, 16))}') · consumption_movement ${items.map(x => '#' + x.c.id).join(', ') || '—'}</span>`)}
+      <p class="text-[13px] text-ink/60 mt-4">${used.length ? `Took ${listOf(used)}.` : 'No ingredients recorded.'}</p>
+      ${schema(`<span class="block mt-1">batch.id ${b.id} · FK feeding (${b.starter_id}, '${esc(b.feeding_time.slice(0, 16))}') · stock_movement.batch_id = ${b.id}: ${items.map(x => '#' + x.m.id).join(', ') || '—'}</span>`)}
     </div>
     <div class="flex sm:flex-col items-center sm:items-end gap-x-5 gap-y-3">
       ${stamp}
@@ -707,14 +710,14 @@ function viewStock() {
     return `<label class="flex items-baseline gap-2 text-[13px]"><span class="w-44 truncate text-ink/70">${esc(ing.name)}</span><input type="number" min="0" step="any" class="input !w-16 text-right tnum" data-calc="per" data-id="${id}" value="${calc.per[id]}"><span class="text-ink/50">${ing.unit} a loaf</span></label>`;
   }).join('');
   return section('On the shelves',
-      can('restock') ? `<button type="button" class="btn-primary" data-action="restock">Record a delivery</button>` : `<span class="text-[13px] text-ink/50 font-serif italic">Restocking is for admins and developers.</span>`,
+      can('restock') ? `${can('ingredient.write') ? '<button type="button" class="link" data-action="new-ingredient">New ingredient</button>' : ''}${can('waste') ? '<button type="button" class="link" data-action="waste">Record waste</button>' : ''}<button type="button" class="btn-primary" data-action="restock">Record a delivery</button>` : `<span class="text-[13px] text-ink/50 font-serif italic">Read only — deliveries and ingredients are managed by an admin.</span>`,
       table(th('Ingredient') + th('On hand', 'text-right') + th('') + th('Reorder at', 'text-right') + th('') + th('Movement', 'text-right') + th(''), rows, 'The pantry is empty — reset the demo data.', 7)
       + schema('<span class="block mt-2">on hand = SUM(restock) − SUM(consumption) over stock_movement</span>'), true)
     + section('Can I bake today?', '',
       `<p class="font-serif text-lg mt-5 leading-relaxed">If I bake <input id="calcLoaves" type="number" min="0" step="1" class="input !w-14 !inline-block text-center !text-lg font-serif tnum" data-calc="loaves" value="${calc.loaves}"> loaves, <span id="calcBadge"></span></p>
        <div id="calcResult" class="mt-3"></div>
        <details class="mt-4"><summary class="link inline-block">Change the per-loaf recipe</summary><div class="mt-3 space-y-2">${recipe}</div></details>`)
-    + `<div id="ledger">${ledgerSection()}</div>`;
+    + (can('ledger.view') ? `<div id="ledger">${ledgerSection()}</div>` : '');
 }
 function renderCalcResult() {
   const box = $('#calcResult'); if (!box) return;
@@ -742,12 +745,12 @@ function ledgerSection() {
       + td(when(m.movement_date), 'text-ink/70')
       + td(esc(ing?.name ?? '#' + m.ingredient_id))
       + td(`<span class="font-mono ${isR ? '' : 'text-accent'}">${isR ? '+' : '−'}${fmtQ(m.qty)}</span> <span class="text-ink/50">${esc(ing?.unit ?? '')}</span>`, 'text-right')
-      + td(isR ? `<span class="text-ink/70">${esc(sub?.reason ?? '—')}</span>` : `<span class="text-ink/70">for bake No. ${sub?.batch_id ?? '?'}</span>`)
-      + td(isR ? '' : `<span class="font-mono text-xs">${sub ? fmtMoney(sub.cost) : ''}</span>`, 'text-right !pr-0')
+      + td(isR ? '<span class="text-ink/70">Delivery</span>' : m.batch_id ? `<span class="text-ink/70">Used in bake No. ${m.batch_id}</span>` : `<span class="text-accent">${esc(sub?.reason ?? '—')}</span>`)
+      + td(isR && sub?.cost != null ? `<span class="font-mono text-xs">${fmtMoney(sub.cost)}</span>` : '', 'text-right !pr-0')
       + td(schema(`${isR ? 'restock_movement' : 'consumption_movement'}.id = ${m.id}`), 'schema-only'));
   }).join('');
   return section('Stock ledger', filterLinks('ledger-filter', ledgerFilter, [['all', 'All'], ['restock', 'In'], ['consumption', 'Out']]),
-    `<div class="max-h-[520px] overflow-y-auto scroll-thin">${table(th('No.') + th('When') + th('Ingredient') + th('Qty', 'text-right') + th('Note') + th('Cost', 'text-right') + th('Subtype row', 'schema-only'), body, 'No movements.', 7)}</div>`);
+    `<div class="max-h-[520px] overflow-y-auto scroll-thin">${table(th('No.') + th('When') + th('Ingredient') + th('Qty', 'text-right') + th('Note') + th('Cost paid', 'text-right') + th('Subtype row', 'schema-only'), body, 'No movements.', 7)}</div>`);
 }
 
 /* ---------- Bakers (admin) ---------- */
@@ -773,6 +776,46 @@ function permMatrix() {
    ===================================================================== */
 const field = (label, inner, cls = '') => `<div class="${cls}"><label class="label">${String(label).replace(/\s*\(([^)]*(?:FK|PK|_|→)[^)]*)\)/g, ' <span class="schema-only normal-case tracking-normal font-mono text-ink/40">($1)</span>')}</label>${inner}</div>`;
 
+/* Read one starter: GET /starters/:id, plus its feedings */
+async function openStarterDetail(id) {
+  let s;
+  try { s = await getStarter(id); } catch (e) { handleError(e); return; }
+  const feeds = feedingsOf(id), res = starterReserve(id);
+  const row = (k, v) => `<div class="flex justify-between gap-4 py-1.5 border-b border-ink/10"><dt class="text-ink/55">${k}</dt><dd class="text-right">${v}</dd></div>`;
+  openModal({
+    title: esc(s.name), subtitle: `GET /starters/${s.id} → SELECT * FROM starter WHERE id = ?`, footer: false,
+    body: `<dl class="text-sm">
+        ${row('Starter ID', '#' + s.id)}${row('Flour', esc(s.flour_type))}${row('Hydration', s.hydration + '%')}
+        ${row('Born', fmtDate(s.born) + ` (${ageDays(s.born)} days)`)}${row('Keep back at least', fmtQ(s.min_weight_g) + ' g')}
+        ${row('About in the jar now', fmtQ(res) + ' g')}${row('Feedings written down', feeds.length)}
+      </dl>
+      <p class="label mt-5">Feeding history</p>
+      <ul class="text-[13px] mt-1">${feeds.map(f => `<li class="flex justify-between py-1 border-b border-ink/10"><span>${when(f.feed_time)}</span><span class="tnum">${f.temp != null ? fmtQ(f.temp) + '°C · ' : ''}+${fmtQ(f.qty_added_g)} g</span></li>`).join('') || '<li class="py-1 text-ink/45 font-serif italic">None yet.</li>'}</ul>
+      <div class="flex justify-end items-center gap-5 mt-6"><button type="button" class="btn-ghost" data-close>Close</button><button type="button" class="btn-primary" data-b="edit">Edit</button></div>`,
+    onMount(root, close) { $('[data-b=edit]', root).addEventListener('click', () => { close(); openStarterEditModal(s.id); }); },
+  });
+}
+
+/* Update one starter: PUT /starters/:id */
+function openStarterEditModal(id) {
+  if (!guard('starter.write')) return;
+  const s = db.starter.find(x => x.id === id);
+  openModal({
+    title: 'Edit starter', subtitle: `PUT /starters/${id} → UPDATE starter SET name = ?, flour_type = ?, hydration = ?, born = ?, min_weight_g = ? WHERE id = ?`, submitLabel: 'Save changes',
+    body: `<div class="grid sm:grid-cols-2 gap-3">
+      ${field('Starter name *', `<input name="name" class="input" maxlength="45" value="${esc(s.name)}">`, 'sm:col-span-2')}
+      ${field('Flour type *', `<input name="flour_type" class="input" maxlength="45" value="${esc(s.flour_type)}">`)}
+      ${field('Hydration (%) *', `<input name="hydration" type="number" step="1" min="1" class="input" value="${s.hydration}">`)}
+      ${field('Born *', `<input name="born" type="date" class="input" value="${esc(s.born)}" max="${toSqlDate(Date.now())}">`)}
+      ${field('Min reserve (g) *', `<input name="min_weight_g" type="number" step="1" min="0" class="input" value="${s.min_weight_g}">`)}
+    </div>`,
+    onSubmit(form, errEl) {
+      const f = Object.fromEntries(new FormData(form));
+      return run(() => updateStarter(id, f), { errEl, ok: () => toast('success', 'Starter updated', f.name.trim()) }).then(r => r.ok);
+    },
+  });
+}
+
 function openStarterModal() {
   if (!guard('starter.write')) return;
   openModal({
@@ -796,7 +839,7 @@ function openFeedModal(preId) {
   if (!db.starter.length) return toast('warn', 'No starters', 'Create a starter first.');
   const now = Date.now();
   openModal({
-    title: 'Feed Starter', subtitle: 'POST /starters/:id/feedings → INSERT INTO feeding (starter_id, feed_time, temp, peaktime, qty_added_g) VALUES (?, ?, ?, ?, ?)', submitLabel: 'Log Feeding',
+    title: 'Feed Starter', subtitle: 'POST /starters/:id/feedings → INSERT INTO feeding (starter_id, feed_time, temp, peaktime, qty_added_g, user_id) VALUES (?, ?, ?, ?, ?, ?)', submitLabel: 'Log Feeding',
     body: `<div class="grid sm:grid-cols-2 gap-3">
       ${field('Starter (FK → starter.id) *', `<select name="starter_id" class="input">${db.starter.map(s => `<option value="${s.id}" ${s.id === preId ? 'selected' : ''}>#${s.id} · ${esc(s.name)}</option>`).join('')}</select>`, 'sm:col-span-2')}
       ${field('Feed time (part of PK) *', `<input name="feed_time" type="datetime-local" class="input" value="${toInput(toSql(now))}">`)}
@@ -824,7 +867,7 @@ function openBatchModal(preStarter) {
   const first = withFeeds.find(s => s.id === preStarter) || withFeeds[0];
   openModal({
     title: 'Start New Bread Batch', wide: true, submitLabel: 'Start Batch',
-    subtitle: 'POST /batches → CALL sp_add_batch_with_consumption(?, ?, ?, ?, ?, @bid); SELECT @bid',
+    subtitle: 'POST /batches → CALL sp_add_batch_with_consumption(?, ?, ?, ?, ?, ?, @bid); SELECT @bid',
     body: `<div class="grid sm:grid-cols-2 gap-3">
       ${field('Starter culture (FK) *', `<select name="starter_id" class="input">${withFeeds.map(s => `<option value="${s.id}" ${s.id === first.id ? 'selected' : ''}>#${s.id} · ${esc(s.name)}</option>`).join('')}</select>`)}
       ${field('Feeding run (FK → feeding PK) *', `<select name="feeding_time" class="input"></select>`)}
@@ -834,8 +877,8 @@ function openBatchModal(preStarter) {
     <p id="reserveHint" class="text-xs mt-2"></p>
     <div class="flex flex-wrap items-center justify-between gap-2 mt-5 mb-2">
       <p class="h-serif text-lg">Ingredients consumed <span class="schema-only font-mono text-[11px] text-ink/40 font-normal">→ p_items JSON</span></p>
-      <div class="flex gap-2"><button type="button" class="btn-ghost !py-1.5" data-b="recipe"><i data-lucide="wand-sparkles"></i>Fill from recipe</button>
-      <button type="button" class="btn-ghost !py-1.5" data-b="add"><i data-lucide="plus"></i>Add line</button></div>
+      <div class="flex gap-2"><button type="button" class="btn-ghost !py-1.5" data-b="recipe">Fill from recipe</button>
+      <button type="button" class="btn-ghost !py-1.5" data-b="add">Add line</button></div>
     </div>
     <div id="itemRows" class="space-y-2"></div>
     <div id="batchSummary" class="mt-3"></div>
@@ -845,26 +888,18 @@ function openBatchModal(preStarter) {
       const fillFeeds = () => {
         fSel.innerHTML = feedingsOf(+sSel.value).map((f, i) => `<option value="${esc(f.feed_time)}">${fmtDT(f.feed_time)} · +${fmtQ(f.qty_added_g)} g${i === 0 ? ' (latest)' : ''}</option>`).join('');
       };
-      const addRow = (it = {}) => { rowsBox.insertAdjacentHTML('beforeend', itemRowHTML(it)); icons(); };
+      const addRow = (it = {}) => { rowsBox.insertAdjacentHTML('beforeend', itemRowHTML(it)); };
       const recipe = () => {
         const n = Math.max(1, Math.floor(+$('[name=loaf_count]', root).value || 1));
         const rye = /rye/i.test(db.starter.find(s => s.id === +sSel.value)?.flour_type || '');
         const lines = rye ? [[2, 350], [1, 150], [5, 400], [4, 10]] : [[1, 450], [5, 320], [4, 10]];
         rowsBox.innerHTML = '';
-        lines.filter(([id]) => db.ingredient.some(i => i.id === id)).forEach(([id, per]) => addRow({ ingredient_id: id, qty: per * n, cost: +(per * n * (PRICE_HINT[id] || 0)).toFixed(2) }));
+        lines.filter(([id]) => db.ingredient.some(i => i.id === id)).forEach(([id, per]) => addRow({ ingredient_id: id, qty: per * n }));
         update();
       };
       const update = () => updateBatchPreview(root);
       sSel.addEventListener('change', () => { fillFeeds(); update(); });
-      root.addEventListener('input', e => {
-        const row = e.target.closest('.ing-row');
-        if (row && e.target.dataset.f === 'cost') e.target.dataset.manual = '1';
-        if (row && (e.target.dataset.f === 'qty' || e.target.dataset.f === 'ing')) {
-          const c = $('[data-f=cost]', row), id = +$('[data-f=ing]', row).value, q = +$('[data-f=qty]', row).value;
-          if (c.dataset.manual !== '1' && id && q > 0) c.value = (q * (PRICE_HINT[id] || 0)).toFixed(2);
-        }
-        update();
-      });
+      root.addEventListener('input', () => update());
       root.addEventListener('change', () => update());
       root.addEventListener('click', e => {
         const b = e.target.closest('[data-b], [data-f=rm]'); if (!b) return;
@@ -876,9 +911,9 @@ function openBatchModal(preStarter) {
     },
     onSubmit(form, errEl, root) {
       const f = Object.fromEntries(new FormData(form));
-      const items = $$('.ing-row', root).map(r => ({ ingredient_id: $('[data-f=ing]', r).value, qty: $('[data-f=qty]', r).value, cost: $('[data-f=cost]', r).value }));
+      const items = $$('.ing-row', root).map(r => ({ ingredient_id: $('[data-f=ing]', r).value, qty: $('[data-f=qty]', r).value }));
       return run(() => spAddBatchWithConsumption(+f.starter_id, f.feeding_time, f.qty_removed_g, f.loaf_count, items),
-        { errEl, ok: id => { toast('success', `Bake No. ${id} started`, `${items.length} ingredient(s) taken from the pantry.`); activeTab = 'batches'; sessionStorage.setItem(SS_TAB, activeTab); batchFilter = 'all'; renderAll(); } }).then(r => r.ok);
+        { errEl, ok: id => { toast('success', `Bake No. ${id} started`, `${items.length} ingredient(s) taken from the pantry.`); activeTab = 'batches'; batchFilter = 'all'; renderAll(); } }).then(r => r.ok);
     },
   });
 }
@@ -886,17 +921,16 @@ function itemRowHTML(it = {}) {
   const opts = db.ingredient.map(i => `<option value="${i.id}" ${i.id === it.ingredient_id ? 'selected' : ''}>${esc(i.name)} (${i.unit})</option>`).join('');
   return `<div class="ing-row border-b border-ink/15 py-2">
     <div class="grid grid-cols-12 gap-2 items-center">
-      <select class="input col-span-12 sm:col-span-5" data-f="ing" aria-label="Ingredient"><option value="">Select ingredient…</option>${opts}</select>
-      <input class="input col-span-5 sm:col-span-3 " type="number" min="0" step="any" placeholder="Qty" data-f="qty" aria-label="Quantity" value="${it.qty ?? ''}">
-      <div class="col-span-5 sm:col-span-3 relative"><span class="absolute left-3 top-2 text-sm text-stone-400">${CURRENCY}</span><input class="input pl-7 " type="number" min="0" step="0.01" placeholder="Cost" data-f="cost" aria-label="Cost" value="${it.cost ?? ''}"></div>
-      <button type="button" class="btn-icon col-span-2 sm:col-span-1" data-f="rm" title="Remove line" aria-label="Remove line"><i data-lucide="x"></i></button>
+      <select class="input col-span-12 sm:col-span-7" data-f="ing" aria-label="Ingredient"><option value="">Select ingredient…</option>${opts}</select>
+      <input class="input col-span-10 sm:col-span-4" type="number" min="0" step="any" placeholder="Qty" data-f="qty" aria-label="Quantity" value="${it.qty ?? ''}">
+      <button type="button" class="btn-icon col-span-2 sm:col-span-1" data-f="rm" title="Remove line" aria-label="Remove line">×</button>
     </div><div class="preview text-xs mt-1.5 px-1"></div></div>`;
 }
 function updateBatchPreview(root) {
-  const used = {}; let bad = 0, cost = 0, lines = 0;
+  const used = {}; let bad = 0, lines = 0;
   $$('.ing-row', root).forEach(r => {
-    const id = +$('[data-f=ing]', r).value, q = +$('[data-f=qty]', r).value || 0, c = +$('[data-f=cost]', r).value || 0;
-    const p = $('.preview', r); cost += c;
+    const id = +$('[data-f=ing]', r).value, q = +$('[data-f=qty]', r).value || 0;
+    const p = $('.preview', r);
     if (!id) { p.innerHTML = '<span class="text-stone-400">Choose an ingredient</span>'; return; }
     lines++;
     const ing = db.ingredient.find(i => i.id === id);
@@ -906,36 +940,81 @@ function updateBatchPreview(root) {
     else { r.classList.remove('!border-red-300', '!bg-red-50'); p.innerHTML = q > 0 ? `<span class="text-stone-500">Available ${fmtQ(avail)} ${ing.unit} → after <b class="${avail - q <= (ing.reorder ?? -1) ? 'text-amber-700' : 'text-emerald-700'}">${fmtQ(avail - q)} ${ing.unit}</b>${avail - q <= (ing.reorder ?? -1) ? ' (below reorder)' : ''}</span>` : '<span class="text-stone-400">Enter a quantity</span>'; }
   });
   $('#batchSummary', root).innerHTML = `<div class="rounded-xl border ${bad ? 'border-red-200 bg-red-50 text-red-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'} px-3 py-2 text-sm flex flex-wrap justify-between gap-2">
-    <span>${bad ? `<b>${bad} line(s) exceed stock.</b> Submitting will be rejected and the whole batch rolled back.` : `<b>Stock check passed</b> for ${lines} line(s).`}</span><span class="font-bold">Total cost ${fmtMoney(cost)}</span></div>`;
+    <span>${bad ? `<b>${bad} line(s) exceed stock.</b> Submitting will be rejected and the whole batch rolled back.` : `<b>Stock check passed</b> for ${lines} line(s).`}</span></div>`;
   const sid = +$('[name=starter_id]', root).value, s = db.starter.find(x => x.id === sid);
   const res = starterReserve(sid), rem = +$('[name=qty_removed_g]', root).value || 0, after = res - rem;
   $('#reserveHint', root).innerHTML = s ? `<span class="${after < s.min_weight_g ? 'text-amber-700 font-semibold' : 'text-stone-500'}">Starter reserve ≈ ${fmtQ(res)} g → ${fmtQ(after)} g after removal (min ${fmtQ(s.min_weight_g)} g)${after < s.min_weight_g ? ' — below minimum, feed the starter soon' : ''}.</span>` : '';
 }
 
-function openRestockModal(preId) {
-  if (!guard('restock')) return;
+/* Waste: POST /stock-movements/waste — a consumption with a reason and no bake */
+function openWasteModal(preId) {
+  if (!guard('waste')) return;
   const opt = i => `<option value="${i.id}" ${i.id === preId ? 'selected' : ''}>${esc(i.name)} — ${fmtQ(stockOf(i.id).stock)} ${i.unit} on hand</option>`;
   openModal({
-    title: 'Restock Ingredients', subtitle: 'POST /stock-movements/restock → CALL sp_record_restock(?, ?, ?)', submitLabel: 'Record Restock', submitClass: 'btn-green',
+    title: 'Record waste', subtitle: 'POST /stock-movements/waste → transaction: INSERT stock_movement (batch_id NULL) + INSERT consumption_movement (reason)', submitLabel: 'Record Waste', submitClass: 'btn-danger',
     body: `<div class="grid gap-3">
-      ${field('Ingredient (FK) *', `<select name="ingredient_id" class="input">${db.ingredient.map(opt).join('')}</select>`)}
-      ${field('Quantity received *', `<div class="relative"><input name="qty" type="number" min="0" step="any" class="input pr-12 " placeholder="e.g. 10000"><span id="rUnit" class="absolute right-3 top-2 text-sm text-stone-400"></span></div>`)}
-      ${field('Reason (restock_movement.reason) *', `<input name="reason" class="input" maxlength="45" placeholder="e.g. Weekly mill delivery">`)}
-      <div class="flex flex-wrap gap-1.5">${['Weekly mill delivery', 'Supplier shipment', 'Emergency top-up', 'Inventory correction'].map(r => `<button type="button" class="chip bg-white border-stone-200 text-stone-600 hover:border-stone-400" data-reason="${r}">${r}</button>`).join('')}</div>
-      <p id="rPreview" class="text-sm"></p></div>`,
+      ${field('Ingredient *', `<select name="ingredient_id" class="input">${db.ingredient.map(opt).join('')}</select>`)}
+      ${field('Quantity thrown away *', `<div class="relative"><input name="qty" type="number" min="0" step="any" class="input pr-12" placeholder="e.g. 400"><span id="wUnit" class="absolute right-3 top-2 text-sm text-ink/40"></span></div>`)}
+      ${field('Reason *', `<input name="reason" class="input" maxlength="45" placeholder="e.g. Bag torn, flour spilled">`)}
+      <div class="flex flex-wrap gap-1.5">${['Spilled', 'Spoiled', 'Past its date', 'Pests'].map(x => `<button type="button" class="chip" data-reason="${x}">${x}</button>`).join('')}</div>
+      <p id="wPreview" class="text-sm"></p></div>`,
     onMount(root) {
       const sel = $('[name=ingredient_id]', root), qty = $('[name=qty]', root);
-      const upd = () => { const i = db.ingredient.find(x => x.id === +sel.value); const s = stockOf(i.id).stock; $('#rUnit', root).textContent = i.unit;
-        $('#rPreview', root).innerHTML = `Stock now <b class="">${fmtQ(s)} ${i.unit}</b> → after <b class="text-emerald-700">${fmtQ(s + (+qty.value > 0 ? +qty.value : 0))} ${i.unit}</b> <span class="text-stone-400">(reorder at ${fmtQ(i.reorder ?? 0)})</span>`; };
+      const upd = () => { const i = db.ingredient.find(x => x.id === +sel.value), s = stockOf(i.id).stock, q = +qty.value > 0 ? +qty.value : 0; $('#wUnit', root).textContent = i.unit;
+        $('#wPreview', root).innerHTML = q > s ? `<span class="text-accent">Only ${fmtQ(s)} ${i.unit} on hand — the database will refuse this.</span>` : `Stock now <b>${fmtQ(s)} ${i.unit}</b> → after <b>${fmtQ(s - q)} ${i.unit}</b>`; };
       sel.addEventListener('change', upd); qty.addEventListener('input', upd);
       root.addEventListener('click', e => { const b = e.target.closest('[data-reason]'); if (b) $('[name=reason]', root).value = b.dataset.reason; });
       upd();
     },
     onSubmit(form, errEl) {
       const f = Object.fromEntries(new FormData(form));
-      return run(() => spRecordRestock(+f.ingredient_id, f.qty, f.reason), { errEl, ok: id => {
+      return run(() => recordWaste(+f.ingredient_id, f.qty, f.reason), { errEl, ok: () => {
         const i = db.ingredient.find(x => x.id === +f.ingredient_id);
-        toast('success', 'Delivery recorded', `+${fmtQ(f.qty)} ${i.unit} ${i.name}.`); } }).then(r => r.ok);
+        toast('success', 'Waste recorded', `−${fmtQ(f.qty)} ${i.unit} ${i.name}: ${f.reason.trim()}.`); } }).then(r => r.ok);
+    },
+  });
+}
+
+function openRestockModal(preId) {
+  if (!guard('restock')) return;
+  const opt = i => `<option value="${i.id}" ${i.id === preId ? 'selected' : ''}>${esc(i.name)} — ${fmtQ(stockOf(i.id).stock)} ${i.unit} on hand</option>`;
+  openModal({
+    title: 'Record a delivery', subtitle: 'POST /stock-movements/restock → CALL sp_record_restock(ingredient_id, qty, cost, user_id)', submitLabel: 'Record Delivery', submitClass: 'btn-green',
+    body: `<div class="grid gap-3">
+      ${field('Ingredient (FK) *', `<select name="ingredient_id" class="input">${db.ingredient.map(opt).join('')}</select>`)}
+      ${field('Quantity received *', `<div class="relative"><input name="qty" type="number" min="0" step="any" class="input pr-12 " placeholder="e.g. 10000"><span id="rUnit" class="absolute right-3 top-2 text-sm text-stone-400"></span></div>`)}
+      ${field('Cost paid (฿) *', `<input name="cost" type="number" min="0" step="0.01" class="input" placeholder="e.g. 875">`)}
+      <p id="rPreview" class="text-sm"></p></div>`,
+    onMount(root) {
+      const sel = $('[name=ingredient_id]', root), qty = $('[name=qty]', root);
+      const upd = () => { const i = db.ingredient.find(x => x.id === +sel.value); const s = stockOf(i.id).stock; $('#rUnit', root).textContent = i.unit;
+        $('#rPreview', root).innerHTML = `Stock now <b class="">${fmtQ(s)} ${i.unit}</b> → after <b class="text-emerald-700">${fmtQ(s + (+qty.value > 0 ? +qty.value : 0))} ${i.unit}</b> <span class="text-stone-400">(reorder at ${fmtQ(i.reorder ?? 0)})</span>`; };
+      sel.addEventListener('change', upd); qty.addEventListener('input', upd);
+      upd();
+    },
+    onSubmit(form, errEl) {
+      const f = Object.fromEntries(new FormData(form));
+      return run(() => spRecordRestock(+f.ingredient_id, f.qty, f.cost), { errEl, ok: () => {
+        const i = db.ingredient.find(x => x.id === +f.ingredient_id);
+        toast('success', 'Delivery recorded', `+${fmtQ(f.qty)} ${i.unit} ${i.name}, ${fmtMoney(f.cost || 0)}.`); } }).then(r => r.ok);
+    },
+  });
+}
+
+/* Create an ingredient: POST /ingredients */
+function openIngredientModal() {
+  if (!guard('ingredient.write')) return;
+  openModal({
+    title: 'New ingredient', subtitle: 'POST /ingredients → INSERT INTO ingredient (name, unit, reorder) VALUES (?, ?, ?)', submitLabel: 'Add Ingredient',
+    body: `<div class="grid sm:grid-cols-2 gap-3">
+      ${field('Name *', `<input name="name" class="input" maxlength="80" placeholder="e.g. Spelt Flour">`, 'sm:col-span-2')}
+      ${field('Unit *', `<input name="unit" class="input" maxlength="5" list="unitList" placeholder="g"><datalist id="unitList"><option>g</option><option>ml</option><option>kg</option><option>pcs</option></datalist>`)}
+      ${field('Reorder at *', `<input name="reorder" type="number" min="0" step="any" class="input" placeholder="e.g. 2000">`)}
+    </div>
+    <p class="text-xs text-ink/55 mt-3">It starts with 0 in stock. Record a delivery to add some.</p>`,
+    onSubmit(form, errEl) {
+      const f = Object.fromEntries(new FormData(form));
+      return run(() => createIngredient(f), { errEl, ok: () => toast('success', 'Ingredient added', f.name.trim()) }).then(r => r.ok);
     },
   });
 }
@@ -1017,13 +1096,15 @@ function initLogin() {
 /* =====================================================================
    EVENTS + INIT
    ===================================================================== */
-const goTab = tab => { setSidebar(false); activeTab = tab; sessionStorage.setItem(SS_TAB, activeTab); renderAll(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+const goTab = tab => { setSidebar(false); activeTab = tab; renderAll(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
 const actions = {
   tab: d => goTab(d.tab),
   nav: d => goTab(d.tab),
   'sidebar-toggle': () => setSidebar(!sidebarOpen),
   'sidebar-close': () => setSidebar(false),
   'new-starter': () => openStarterModal(),
+  'starter-detail': d => openStarterDetail(+d.id),
+  'edit-starter': d => openStarterEditModal(+d.id),
   feed: d => openFeedModal(+d.id || null),
   bake: d => openBatchModal(+d.id || null),
   'delete-starter': d => {
@@ -1038,13 +1119,15 @@ const actions = {
   advance: d => run(() => advanceBatch(+d.id), { ok: s => toast('success', `Bake No. ${d.id} → ${STAGES[s]}`, s === 3 ? 'Out of the oven.' : 'Time written down.') }),
   'delete-batch': d => {
     if (!guard('batch.write')) return;
-    const b = db.batch.find(x => x.id === +d.id), n = db.consumption_movement.filter(c => c.batch_id === b.id).length;
+    const b = db.batch.find(x => x.id === +d.id), n = db.stock_movement.filter(m => m.batch_id === b.id).length;
     confirmModal({ title: `Delete bake No. ${b.id}?`, confirmLabel: 'Delete Bake',
       message: n ? `This bake has <b>${n}</b> ingredient record(s) in the stock ledger, so the database will refuse to delete it.` : 'This bake has no ingredient records and can be deleted.',
       onConfirm: () => run(() => deleteBatch(b.id), { ok: () => toast('success', `Bake No. ${b.id} deleted`) }) });
   },
   restock: d => openRestockModal(+d.id || null),
+  waste: d => openWasteModal(+d.id || null),
   'edit-reorder': d => openReorderModal(+d.id),
+  'new-ingredient': () => openIngredientModal(),
   'ledger-filter': d => { ledgerFilter = d.f; renderAll(); },
   'new-user': () => openUserModal(null),
   'edit-user': d => openUserModal(+d.id),
@@ -1067,7 +1150,6 @@ document.addEventListener('click', e => {
 document.addEventListener('change', e => {
   if (e.target.id === 'schemaToggle') {
     showSchema = e.target.checked;
-    try { localStorage.setItem(LS_SCHEMA, showSchema ? '1' : '0'); } catch (err) {}
     renderAll();
   }
 });
@@ -1078,8 +1160,6 @@ document.addEventListener('input', e => {
   renderCalcResult();
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && sidebarOpen) setSidebar(false); });
-// Re-draw the jars every minute so rise and READY / HUNGRY stay current.
-setInterval(() => { if (me() && !$('#modalRoot').children.length && activeTab === 'starters') renderAll(); }, 60000);
 
 /* Start: ask the server who is signed in (GET /auth/me), then load the tables. */
 (async function init() {

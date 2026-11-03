@@ -127,7 +127,11 @@ exports.listFeedings = async (req, res) => {
 
     try {
         const [rows] = await pool.execute(
-            'SELECT * FROM feeding WHERE starter_id = ? ORDER BY feed_time DESC',
+            `SELECT f.*, u.username AS logged_by
+               FROM feeding f
+               JOIN user u ON f.user_id = u.id
+              WHERE f.starter_id = ?
+              ORDER BY f.feed_time DESC`,
             [id]
         );
         res.json(rows);
@@ -159,8 +163,8 @@ exports.addFeeding = async (req, res) => {
 
     try {
         await pool.execute(
-            'INSERT INTO feeding (starter_id, feed_time, temp, peaktime, qty_added_g) VALUES (?, ?, ?, ?, ?)',
-            [id, feed_time, temp ?? null, peaktime ?? null, qty_added_g]
+            'INSERT INTO feeding (starter_id, feed_time, temp, peaktime, qty_added_g, user_id) VALUES (?, ?, ?, ?, ?, ?)',
+            [id, feed_time, temp ?? null, peaktime ?? null, qty_added_g, req.session.user.id]   // who did it comes from the login session
         );
         res.status(201).json({ starter_id: id, feed_time, temp, peaktime, qty_added_g });
     } catch (err) {

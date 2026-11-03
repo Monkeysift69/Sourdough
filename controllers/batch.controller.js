@@ -9,9 +9,10 @@ function fail(res, err) {
 exports.getAll = async (req, res) => {
     try {
         const [rows] = await pool.execute(
-            `SELECT b.*, s.name AS starter_name
+            `SELECT b.*, s.name AS starter_name, u.username AS baked_by
                FROM batch b
                JOIN starter s ON b.starter_id = s.id
+               JOIN user u ON b.user_id = u.id
               ORDER BY b.id DESC`
         );
         res.json(rows);
@@ -29,20 +30,20 @@ exports.getOne = async (req, res) => {
 
     try {
         const [rows] = await pool.execute(
-            `SELECT b.*, s.name AS starter_name
+            `SELECT b.*, s.name AS starter_name, u.username AS baked_by
                FROM batch b
                JOIN starter s ON b.starter_id = s.id
+               JOIN user u ON b.user_id = u.id
               WHERE b.id = ?`,
             [id]
         );
         if (rows.length === 0) return res.status(404).json({ error: 'Batch not found' });
 
         const [items] = await pool.execute(
-            `SELECT sm.id AS movement_id, i.id AS ingredient_id, i.name, i.unit, sm.qty, cm.cost
-               FROM consumption_movement cm
-               JOIN stock_movement sm ON cm.id = sm.id
+            `SELECT sm.id AS movement_id, i.id AS ingredient_id, i.name, i.unit, sm.qty
+               FROM stock_movement sm
                JOIN ingredient i ON sm.ingredient_id = i.id
-              WHERE cm.batch_id = ?`,
+              WHERE sm.batch_id = ?`,
             [id]
         );
 
@@ -56,7 +57,7 @@ exports.getOne = async (req, res) => {
 
 // POST /batches
 // body: { starter_id, feeding_time, qty_removed_g, loaf_count,
-//         items: [{ ingredient_id, qty, cost }, ...] }
+//         items: [{ ingredient_id, qty }, ...] }
 exports.create = async (req, res) => {
     const { starter_id, feeding_time, qty_removed_g, loaf_count, items } = req.body;
 
@@ -82,9 +83,6 @@ exports.create = async (req, res) => {
         if (typeof it.qty !== 'number' || it.qty <= 0) {
             return res.status(400).json({ error: 'Each item needs a qty above 0' });
         }
-        if (!Number.isInteger(it.cost) || it.cost < 0) {
-            return res.status(400).json({ error: 'Each item needs a whole-number cost, 0 or more' });
-        }
     }
 
     // The OUT parameter @bid lives on one connection, so CALL and SELECT
@@ -94,8 +92,10 @@ exports.create = async (req, res) => {
     try {
         conn = await pool.getConnection();
         await conn.query(
-            'CALL sp_add_batch_with_consumption(?, ?, ?, ?, ?, @bid)',
-            [starter_id, feeding_time, qty_removed_g, loaf_count, JSON.stringify(items)]
+            'CALL sp_add_batch_with_consumption(?, ?, ?, ?, ?, ?, @bid)',
+            [starter_id, feeding_time, qty_removed_g, loaf_count,
+             JSON.stringify(items.map(it => ({ ingredient_id: it.ingredient_id, qty: it.qty }))),
+             req.session.user.id]
         );
         const [rows] = await conn.query('SELECT @bid AS id');
         const batchId = rows[0].id;
