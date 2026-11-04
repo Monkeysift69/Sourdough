@@ -30,8 +30,9 @@ SET @now = STR_TO_DATE(DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:00'), '%Y-%m-%d %H:%i:
 INSERT INTO user (id, username, password_hash, role) VALUES
   (1, 'dev',   '$2a$10$fPL29hpffRZGtlKIQkH/kOPlo/xAPAo4rQ2t/kJeDXTOPPjy6WDmC', 'developer'),
   (2, 'admin', '$2a$10$4QEkxJgI2RJN7KVlKmoK4esmcGmWQwzuZy4GbKuE6Dyugnn4X6r.e', 'admin'),
-  (3, 'baker', '$2a$10$X/AxfiW6YdrXCac.twuJMOgE0ALRsf4Yn6EZYbw5SVcor8M.cin.W', 'user');
-
+  (3, 'baker', '$2a$10$X/AxfiW6YdrXCac.twuJMOgE0ALRsf4Yn6EZYbw5SVcor8M.cin.W', 'user'),
+  (4, 'baker2', '$2a$10$/ZU2fWnna.8hx/kTAF/f6uLc6gb15geLGeYjWcfe0KUFAqIHpy5PK', 'user');
+  
 -- ---------------------------------------------------------------------
 -- starter
 -- ---------------------------------------------------------------------
@@ -39,7 +40,7 @@ INSERT INTO starter (id, name, flour_type, hydration, born, min_weight_g) VALUES
   (1, 'San Francisco Mother Levain', 'Unbleached Bread Flour',  100, DATE(@now - INTERVAL 306 DAY), 200),
   (2, 'Nordic Rye Starter',          'Dark Rye Flour',          100, DATE(@now - INTERVAL 252 DAY), 150),
   (3, 'Heritage Whole Wheat',        'Stoneground Whole Wheat', 100, DATE(@now - INTERVAL 179 DAY), 150);
-
+  
 -- ---------------------------------------------------------------------
 -- feeding  (weak entity, key = starter_id + feed_time)
 --   starter 1: peaked 30 min ago  -> READY

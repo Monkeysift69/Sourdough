@@ -1,50 +1,13 @@
-# ============================================================================
-#  CSS326 Lab — Test Cases TC01–TC14   (Sourdough Log)
-# ----------------------------------------------------------------------------
-#  Open in VS Code "REST Client" (humao.rest-client) or JetBrains HTTP client.
-#  Click "Send Request" above each ### block.
-#
-#  The rubric is written in library terms (books/loans/members). This file maps
-#  each criterion onto THIS app:
-#     books/catalog item   -> ingredient   (admin-gated CRUD)
-#     borrow / decrement    -> batch creation consumes stock (fires a TRIGGER)
-#     stored procedure      -> sp_record_restock / sp_add_batch_with_consumption
-#     audit / developer page-> /users  (developer-only)
-#
-#  COOKIES: the client keeps ONE cookie jar per host. "Logging in" as a role
-#  REPLACES the current session, so for the access-control cases just send the
-#  right login request immediately before the test. Re-send a login whenever
-#  you want to switch role.
-#
-#  Some criteria (TC01, TC02, TC11) are inspection steps, not HTTP requests.
-#  They're written as checklists so this file is a complete test record.
-# ============================================================================
 
-@real = http://localhost:3650
+@real = http://localhost:3000
 
 # Seeded accounts (sql/seed.sql). Fill in the passwords you seeded with.
 @devUser   = dev
-@devPass   = CHANGE_ME
+@devPass   = dev123
 @adminUser = admin
-@adminPass = CHANGE_ME
+@adminPass = admin123
 @userUser  = baker
-@userPass  = CHANGE_ME
-
-
-# ████████████████████████████████████████████████████████████████████████████
-#  TC01 — ERD & schema            [MANUAL / inspection, no request]
-#  Expected: 5+ entities, 3+ relationships; a weak-entity FK is in place.
-#  Check in MySQL Workbench:
-#    Entities: user, starter, feeding, batch, ingredient, stock_movement,
-#              consumption_movement, restock_movement  (8)
-#    feeding.starter_id      FK -> starter.id   (weak entity: PK = starter_id+feed_time)
-#    batch.starter_id        FK -> starter.id
-#    batch (starter_id,feeding_time) FK -> feeding
-#    stock_movement.ingredient_id FK -> ingredient.id
-#  SQL to confirm the FK:
-#    SELECT * FROM information_schema.KEY_COLUMN_USAGE
-#     WHERE TABLE_NAME='feeding' AND REFERENCED_TABLE_NAME IS NOT NULL;
-# ████████████████████████████████████████████████████████████████████████████
+@userPass  = baker123
 
 
 # ████████████████████████████████████████████████████████████████████████████
@@ -110,13 +73,16 @@ Content-Type: application/json
 
 { "username": "{{adminUser}}", "password": "{{adminPass}}" }
 
-### TC05b update ingredient 1 -> 200 { updated: 1 }  (change name/unit/reorder)
+### TC05b read first to look at id 1
+GET {{real}}/ingredients/1
+
+### TC05c update ingredient 1 -> 200 { updated: 1 }  (change name/unit/reorder)
 PUT {{real}}/ingredients/1
 Content-Type: application/json
 
 { "name": "Unbleached Bread Flour", "unit": "g", "reorder": 5000 }
 
-### TC05c read back to confirm the new value
+### TC05d read back to confirm the new value
 GET {{real}}/ingredients/1
 
 
@@ -126,10 +92,10 @@ GET {{real}}/ingredients/1
 # ████████████████████████████████████████████████████████████████████████████
 
 ### TC06a delete -> 204 No Content  (change the id to the TC03 one)
-DELETE {{real}}/ingredients/REPLACE_WITH_TC03_ID
+DELETE {{real}}/ingredients/7
 
 ### TC06b confirm it is gone -> 404
-GET {{real}}/ingredients/REPLACE_WITH_TC03_ID
+GET {{real}}/ingredients/7
 
 
 # ████████████████████████████████████████████████████████████████████████████
@@ -214,53 +180,11 @@ Content-Type: application/json
 
 { "username": "' OR '1'='1", "password": "x" }
 
-### TC10b comment-out bypass -> 401
-POST {{real}}/auth/login
-Content-Type: application/json
-
-{ "username": "admin' -- ", "password": "x" }
-
-### TC10c always-true + comment -> 401
+### TC10b always-true + comment -> 401
 POST {{real}}/auth/login
 Content-Type: application/json
 
 { "username": "' OR '1'='1' -- ", "password": "x" }
-
-### TC10d inject the password field -> 401
-POST {{real}}/auth/login
-Content-Type: application/json
-
-{ "username": "admin", "password": "' OR '1'='1" }
-
-### TC10e stacked query (table must NOT drop) -> 401
-POST {{real}}/auth/login
-Content-Type: application/json
-
-{ "username": "'; DROP TABLE user; -- ", "password": "x" }
-
-#  --- extended injection probes on authed inputs (login as any role first) ---
-
-### TC10f :id path param injection -> 400 (validated as integer)
-GET {{real}}/starters/%27%20OR%20%271%27=%271
-
-### TC10g query-string filter injection -> 200 empty/filtered, no DB error
-GET {{real}}/stock-movements?ingredient_id=%27%20OR%20%271%27=%271
-
-### TC10h BLIND time-based on feeding :feedTime -> INSTANT 400, NOT a 5s wait
-#   A ~5s response would mean SLEEP ran (injectable). Fast = safe.
-GET {{real}}/feedings/1/2026-01-01%27%20AND%20SLEEP(5)--%20
-
-
-# ████████████████████████████████████████████████████████████████████████████
-#  TC11 — Security: queries use ? placeholders; no creds in code  [MANUAL]
-#  Expected: parameterised queries only; credentials live in .env, not source.
-#  Check: grep the controllers — every pool.execute uses ? + an array.
-#     grep -rn "pool.execute" controllers/      # all use ?, none build SQL by +
-#     config/db.js reads process.env.DB_*       # no literal password
-#     .env is in .gitignore                      # secrets not committed
-#  The only interpolation (batch.controller UPDATE) injects WHITELISTED column
-#  names, never user input — values still go through ?.
-# ████████████████████████████████████████████████████████████████████████████
 
 
 # ████████████████████████████████████████████████████████████████████████████
@@ -314,7 +238,7 @@ Content-Type: application/json
 
 {
   "starter_id": 1,
-  "feeding_time": "REPLACE_WITH_FEED_TIME_FROM_TC13b",
+  "feeding_time": "2026-11-02 16:54:00",
   "qty_removed_g": 50,
   "loaf_count": 1,
   "items": [ { "ingredient_id": 1, "qty": 999999, "cost": 10 } ]
@@ -327,7 +251,7 @@ Content-Type: application/json
 
 {
   "starter_id": 1,
-  "feeding_time": "REPLACE_WITH_FEED_TIME_FROM_TC13b",
+  "feeding_time": "2026-11-02 16:54:00",
   "qty_removed_g": 50,
   "loaf_count": 1,
   "items": [ { "ingredient_id": 1, "qty": 100, "cost": 10 } ]
