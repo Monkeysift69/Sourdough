@@ -175,7 +175,7 @@ exports.remove = async (req, res) => {
         if (r.affectedRows === 0) return res.status(404).json({ error: 'Batch not found' });
         res.status(204).end();
     } catch (err) {
-        // consumption_movement rows still point at this batch
+        // stock_movement rows still point at this batch (fk_stock_batch)
         if (err.code === 'ER_ROW_IS_REFERENCED_2') {
             return res.status(409).json({ error: 'This batch has ingredient records and cannot be deleted' });
         }

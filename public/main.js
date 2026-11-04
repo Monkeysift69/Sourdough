@@ -1,0 +1,1003 @@
+'use strict';
+/* =====================================================================
+   1. CONSTANTS
+   ===================================================================== */
+const H = 3600e3, D = 24 * H;
+const PEAK_WINDOW_H = 4;           // a starter counts as "Ready" for 4h after its peak time
+const CURRENCY = '฿';
+
+// Mirrors the role checks in middleware/auth.js on the server.
+// The UI only hides buttons; the server is what actually refuses.
+const PERMS = {
+  'starter.write':  ['developer','admin','user'],
+  'feeding.write':  ['developer','admin','user'],
+  'batch.write':    ['developer','admin','user'],
+  'restock':        ['developer','admin'],
+  'reorder.update': ['developer','admin'],
+  'ingredient.write': ['developer','admin'],
+  'ledger.view':    ['developer','admin'],
+  'waste':          ['developer','admin'],
+  'user.manage':    ['developer'],
+  'schema.view':    ['developer'],
+};
+const ROLE_VIEW = { user: "Baker's view", admin: 'Admin view', developer: 'Developer view' };
+const PERM_LABEL = {
+  'starter.write':'Create / delete starters', 'feeding.write':'Log feedings',
+  'batch.write':'Start / advance / delete bakes', 'restock':'Record deliveries',
+  'reorder.update':'Edit reorder level', 'ingredient.write':'Add ingredients',
+  'ledger.view':'See the stock ledger', 'waste':'Record waste', 'user.manage':'Manage bakers', 'schema.view':'Show the schema',
+};
+const STAGES = ['Mixing','Bulk Ferment','Cold Proof','Baked'];
+
+/* =====================================================================
+   2. UTILITIES
+   ===================================================================== */
+const $ = (s, r = document) => r.querySelector(s);
+const $$ = (s, r = document) => [...r.querySelectorAll(s)];
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const pad = n => String(n).padStart(2, '0');
+const MON = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+function toSql(d) { d = new Date(d); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; }
+function toSqlDate(d) { d = new Date(d); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}`; }
+function parse(s) { if (!s) return null; return new Date(String(s).length === 10 ? s + 'T00:00:00' : String(s).replace(' ', 'T')); }
+function toInput(s) { const d = s ? parse(s) : new Date(); return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`; }
+function fromInput(v) { return v ? v.replace('T', ' ') + (v.length === 16 ? ':00' : '') : null; }
+function fmtDT(s) { if (!s) return '—'; const d = parse(s); let h = d.getHours(); const ap = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12; return `${MON[d.getMonth()]} ${d.getDate()}, ${pad(h)}:${pad(d.getMinutes())} ${ap}`; }
+function fmtDate(s) { const d = parse(s); return `${MON[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}`; }
+const fmtQ = n => Number(n).toLocaleString('en-US', { maximumFractionDigits: 2 });
+const fmtMoney = n => CURRENCY + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const ageDays = born => Math.max(0, Math.floor((Date.now() - parse(born)) / D));
+function dur(ms) { const m = Math.round(Math.abs(ms) / 60000); if (m < 60) return `${m}m`; const h = Math.floor(m / 60), r = m % 60; return r ? `${h}h ${r}m` : `${h}h`; }
+const num = v => (v === '' || v == null ? null : Number(v));
+
+/* =====================================================================
+   3. API — every read and write goes to the Express server
+   ===================================================================== */
+class ApiError extends Error { constructor(status, msg) { super(msg); this.status = status; } }
+
+async function api(method, url, body) {
+  let res;
+  try {
+    res = await fetch(url, {
+      method,
+      headers: body ? { 'Content-Type': 'application/json' } : {},
+      body: body ? JSON.stringify(body) : undefined,
+      credentials: 'same-origin',
+    });
+  } catch (e) {
+    throw new ApiError(0, 'Cannot reach the server. Is `node app.js` running?');
+  }
+  if (res.status === 204) return null;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new ApiError(res.status, data.error || `Request failed (${res.status})`);
+  return data;
+}
+
+/* ---------- Session ---------- */
+let session = null;                         // { id, username, role } from /auth/me
+const me = () => session;
+const can = perm => !!session && PERMS[perm].includes(session.role);
+
+/* ---------- Local copy of the tables (refreshed from the API) ---------- */
+let db = { starter: [], feeding: [], batch: [], ingredient: [], stock_movement: [], restock_movement: [], consumption_movement: [], user: [] };
+
+async function loadAll() {
+  const [starters, batches, ingredients, moves] = await Promise.all([
+    api('GET', '/starters'), api('GET', '/batches'), api('GET', '/ingredients'), api('GET', '/stock-movements'),
+  ]);
+  const feedLists = await Promise.all(starters.map(s => api('GET', `/starters/${s.id}/feedings`)));
+  const users = can('user.manage') ? await api('GET', '/users') : [];
+
+  db = {
+    starter: starters.map(s => ({ ...s, hydration: Number(s.hydration), min_weight_g: Number(s.min_weight_g) })),
+    feeding: feedLists.flat().map(f => ({
+      starter_id: f.starter_id, feed_time: f.feed_time, temp: num(f.temp),
+      peak_time: f.peaktime, qty_added_g: Number(f.qty_added_g), logged_by: f.logged_by,
+    })),
+    batch: batches.map(b => ({ ...b, mix_time: b.mix_time || b.feeding_time, loaf_count: Number(b.loaf_count), qty_removed_g: Number(b.qty_removed_g) })),
+    ingredient: ingredients.map(i => ({ ...i, reorder: num(i.reorder) })),
+    stock_movement: moves.map(m => ({ id: m.id, ingredient_id: m.ingredient_id, movement_date: m.movement_date, qty: Number(m.qty), movement_type: m.movement_type, batch_id: m.batch_id, recorded_by: m.recorded_by })),
+    restock_movement: moves.filter(m => m.movement_type === 'restock').map(m => ({ id: m.id, cost: num(m.cost) })),
+    consumption_movement: moves.filter(m => m.movement_type === 'consumption').map(m => ({ id: m.id, reason: m.reason })),
+    user: users,
+  };
+}
+
+/* ---------- Writes (one function per route) ---------- */
+const createStarter = f => api('POST', '/starters', {
+  name: f.name.trim(), flour_type: f.flour_type.trim(), hydration: num(f.hydration),
+  born: f.born || toSqlDate(Date.now()), min_weight_g: num(f.min_weight_g),
+}).then(r => r.id);
+
+const getStarter = id => api('GET', `/starters/${id}`);
+const updateStarter = (id, f) => api('PUT', `/starters/${id}`, {
+  name: f.name.trim(), flour_type: f.flour_type.trim(), hydration: num(f.hydration),
+  born: f.born, min_weight_g: num(f.min_weight_g),
+});
+const deleteStarter = id => api('DELETE', `/starters/${id}`);
+
+const createFeeding = f => api('POST', `/starters/${Number(f.starter_id)}/feedings`, {
+  feed_time: fromInput(f.feed_time), temp: num(f.temp),
+  peaktime: fromInput(f.peak_time), qty_added_g: num(f.qty_added_g),
+});
+
+const spAddBatchWithConsumption = (starter_id, feeding_time, qty_removed_g, loaf_count, items) => api('POST', '/batches', {
+  starter_id, feeding_time, qty_removed_g: num(qty_removed_g), loaf_count: num(loaf_count),
+  items: items.map(it => ({ ingredient_id: num(it.ingredient_id), qty: num(it.qty) })),
+}).then(r => r.id);
+
+async function advanceBatch(id) {
+  const b = db.batch.find(x => x.id === id), s = stageOf(b), now = toSql(Date.now());
+  const patch = [{ bulk_ferment_start: now }, { bulk_ferment_end: now, cold_proof_start: now }, { cold_proof_end: now }][s];
+  await api('PATCH', `/batches/${id}`, patch);
+  return s + 1;
+}
+
+const deleteBatch = id => api('DELETE', `/batches/${id}`);
+
+const spRecordRestock = (ingredient_id, qty, cost) =>
+  api('POST', '/stock-movements/restock', { ingredient_id, qty: num(qty), cost: num(cost) });
+const recordWaste = (ingredient_id, qty, reason) =>
+  api('POST', '/stock-movements/waste', { ingredient_id, qty: num(qty), reason: String(reason || '').trim() });
+
+const createIngredient = f => api('POST', '/ingredients', { name: String(f.name || '').trim(), unit: String(f.unit || '').trim(), reorder: num(f.reorder) });
+
+function updateReorder(id, value) {
+  const i = db.ingredient.find(x => x.id === id);
+  return api('PUT', `/ingredients/${id}`, { name: i.name, unit: i.unit, reorder: num(value) });
+}
+
+async function login(username, password) {
+  session = await api('POST', '/auth/login', { username: String(username).trim(), password });
+  return session;
+}
+const registerUser = (username, password) => api('POST', '/auth/register', { username: String(username).trim(), password });
+async function createUser(username, password, role) {
+  const u = await registerUser(username, password);
+  if (role !== 'user') await api('PATCH', `/users/${u.id}/role`, { role });
+  return u.id;
+}
+const updateUser = (id, role) => api('PATCH', `/users/${id}/role`, { role });
+const deleteUser = id => api('DELETE', `/users/${id}`);
+
+/* ---------- Derived reads (computed from the local copy) ---------- */
+function stockOf(ingredientId) {
+  let restock = 0, consumed = 0;
+  for (const m of db.stock_movement) if (m.ingredient_id === ingredientId) m.movement_type === 'restock' ? (restock += m.qty) : (consumed += m.qty);
+  return { restock, consumed, stock: restock - consumed };
+}
+const lastFeeding = sid => db.feeding.filter(f => f.starter_id === sid).sort((a, b) => b.feed_time.localeCompare(a.feed_time))[0];
+const feedingsOf = sid => db.feeding.filter(f => f.starter_id === sid).sort((a, b) => b.feed_time.localeCompare(a.feed_time));
+const starterName = id => db.starter.find(s => s.id === id)?.name ?? `#${id} (deleted)`;
+function starterReserve(sid) {
+  const fed = db.feeding.filter(f => f.starter_id === sid).reduce((a, f) => a + f.qty_added_g, 0);
+  const used = db.batch.filter(b => b.starter_id === sid).reduce((a, b) => a + b.qty_removed_g, 0);
+  return fed - used;
+}
+function starterStatus(s) {
+  const f = lastFeeding(s.id);
+  if (!f) return { label: 'Not fed', tone: 'gray', hint: 'Log a first feeding' };
+  if (!f.peak_time) return { label: 'Fed', tone: 'gray', hint: 'No peak time logged' };
+  const now = Date.now(), peak = parse(f.peak_time).getTime();
+  if (now < peak) return { label: 'Rising', tone: 'amber', hint: `Peaks in ${dur(peak - now)}` };
+  if (now - peak <= PEAK_WINDOW_H * H) return { label: 'Ready', tone: 'green', hint: `Peaked ${dur(now - peak)} ago — ready to bake` };
+  return { label: 'Hungry', tone: 'red', hint: `Peaked ${dur(now - peak)} ago — feed soon` };
+}
+function stageOf(b) { if (b.cold_proof_end) return 3; if (b.cold_proof_start) return 2; if (b.bulk_ferment_start) return 1; return 0; }
+function stockStatus(stock, reorder) {
+  if (stock <= 0) return { label: 'Out of Stock', tone: 'red' };
+  if (reorder != null && stock <= reorder) return { label: 'Low Stock', tone: 'red' };
+  if (reorder != null && stock <= reorder * 1.5) return { label: 'Running Low', tone: 'amber' };
+  return { label: 'In Stock', tone: 'green' };
+}
+const lowStockCount = () => db.ingredient.filter(i => stockOf(i.id).stock <= (i.reorder ?? -1)).length;
+
+/* =====================================================================
+   4. UI PRIMITIVES — toast, modal, confirm
+   ===================================================================== */
+const STAMP = { green: 'stamp-ink', red: 'stamp-acc', amber: 'stamp-faint', blue: 'stamp-faint', gray: 'stamp-faint' };
+const badge = (label, tone = 'gray') => `<span class="stamp ${STAMP[tone] || 'stamp-faint'}">${esc(label)}</span>`;
+
+function toast(type, title, msg = '', ms = 5200) {
+  const warm = type === 'error' || type === 'warn';
+  const el = document.createElement('div');
+  el.className = `toast pointer-events-auto bg-paper border border-ink/20 border-t-[3px] ${warm ? 'border-t-accent' : 'border-t-ink'} px-4 py-3 flex gap-3 items-start`;
+  el.setAttribute('role', type === 'error' ? 'alert' : 'status');
+  el.innerHTML = `<div class="flex-1 min-w-0"><p class="font-serif text-[16px] leading-snug ${warm ? 'text-accent' : 'text-ink'}">${esc(title)}</p>${msg ? `<p class="text-[13px] text-ink/65 mt-0.5">${esc(msg)}</p>` : ''}</div>
+    <button class="link !text-xs mt-0.5" aria-label="Dismiss">close</button>`;
+  el.querySelector('button').onclick = () => el.remove();
+  $('#toastRoot').appendChild(el);
+  setTimeout(() => el.remove(), ms);
+}
+
+/* The server already sends a friendly message in { error }; show it. */
+function handleError(e) {
+  const status = e?.status ?? -1;
+  if (status === 401 && session) {               // not logged in any more: back to the login screen
+    session = null; renderAll();
+    return 'Please sign in again.';
+  }
+  const title = { 0: 'Offline', 400: 'Check your input', 401: 'Not signed in', 403: 'Not allowed', 404: 'Not found', 409: 'Could not save' }[status] || 'Something went wrong';
+  toast(status === 400 ? 'warn' : 'error', title, e?.message || 'Please try again.');
+  return e?.message || 'Something went wrong.';
+}
+
+async function refresh() {
+  try { await loadAll(); } catch (e) { handleError(e); }
+  renderAll();
+}
+
+/* Run a write like a controller call: on success reload + re-render; on failure show the error. */
+async function run(fn, { ok, errEl } = {}) {
+  try {
+    const r = await fn();
+    await refresh();
+    ok && ok(r);
+    return { ok: true, value: r };
+  } catch (e) {
+    const msg = handleError(e);
+    if (errEl) { errEl.textContent = msg; errEl.classList.remove('hidden'); }
+    return { ok: false };
+  }
+}
+function guard(perm) {
+  if (can(perm)) return true;
+  toast('warn', 'Not allowed', `Your role (${session?.role}) can't ${PERM_LABEL[perm].toLowerCase()}.`);
+  return false;
+}
+
+function openModal({ title, subtitle = '', body, submitLabel = 'Save', submitClass = 'btn-primary', wide = false, footer = true, onSubmit, onMount }) {
+  const root = document.createElement('div');
+  root.className = 'fixed inset-0 z-50 flex items-end sm:items-center justify-center sm:p-4';
+  root.innerHTML = `<div class="absolute inset-0 bg-ink/35" data-close></div>
+    <form class="modal-panel relative bg-paper w-full ${wide ? 'sm:max-w-3xl' : 'sm:max-w-lg'} max-h-[94vh] flex flex-col border border-ink/20 border-t-[3px] border-t-accent" novalidate>
+      <div class="flex items-start justify-between gap-3 px-6 pt-6 pb-2">
+        <div class="min-w-0"><h3 class="h-serif text-2xl leading-tight">${title}</h3>${subtitle ? `<p class="schema-only text-[11px] font-mono text-ink/50 mt-1.5 break-words">${subtitle}</p>` : ''}</div>
+        <button type="button" class="btn-icon -mr-2" data-close aria-label="Close">×</button>
+      </div>
+      <div class="px-6 pb-5 pt-3 overflow-y-auto scroll-thin flex-1">${body}
+        <p class="form-error hidden mt-4 text-sm text-accent"></p></div>
+      ${footer ? `<div class="px-6 py-4 border-t border-ink/15 flex justify-end items-center gap-5">
+        <button type="button" class="btn-ghost" data-close>Cancel</button><button type="submit" class="${submitClass}">${submitLabel}</button></div>` : ''}
+    </form>`;
+  $('#modalRoot').appendChild(root);
+  const onKey = e => { if (e.key === 'Escape' && $('#modalRoot').lastElementChild === root) close(); };
+  const close = () => { root.remove(); document.removeEventListener('keydown', onKey); };
+  document.addEventListener('keydown', onKey);
+  $$('[data-close]', root).forEach(el => el.addEventListener('click', close));
+  const form = $('form', root);
+  form.addEventListener('submit', async e => {
+    e.preventDefault();
+    const errEl = $('.form-error', root); errEl.classList.add('hidden');
+    if (!onSubmit) return close();
+    const btn = $('[type=submit]', form); if (btn) btn.disabled = true;
+    const done = await onSubmit(form, errEl, root);
+    if (btn) btn.disabled = false;
+    if (done) close();
+  });
+  onMount && onMount(root, close);
+  setTimeout(() => $('input:not([type=hidden]):not([readonly]), select, textarea', form)?.focus(), 60);
+  return { root, close };
+}
+function confirmModal({ title, message, confirmLabel = 'Confirm', danger = true, onConfirm }) {
+  openModal({ title, body: `<p class="text-sm text-ink/75">${message}</p>`, submitLabel: confirmLabel, submitClass: danger ? 'btn-danger' : 'btn-primary',
+    onSubmit: async () => { await onConfirm(); return true; } });
+}
+
+
+/* =====================================================================
+   8. RENDERING
+   ===================================================================== */
+let activeTab = 'starters';
+let batchFilter = 'all', ledgerFilter = 'all';
+let sidebarOpen = false;
+const calc = { loaves: 15, per: { 1: 450, 5: 320, 4: 10 } };
+
+let showSchema = false;
+function applySchema() { document.body.classList.toggle('show-schema', showSchema && can('schema.view')); }
+
+const TABS = [
+  { id: 'starters', label: 'Starters', title: 'The jars' },
+  { id: 'batches',  label: 'Bakes',    title: 'Bakes' },
+  { id: 'stock',    label: 'Pantry',   title: 'Pantry' },
+  { id: 'users',    label: 'Bakers',   title: 'Bakers', perm: 'user.manage' },
+];
+const WD = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
+const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December'];
+const today = () => { const d = new Date(); return `${WD[d.getDay()]}, ${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`; };
+function clock(s) { if (!s) return '—'; const d = parse(s); let h = d.getHours(); const ap = h >= 12 ? 'pm' : 'am'; h = h % 12 || 12; return `${h}:${pad(d.getMinutes())} ${ap}`; }
+function when(s) {
+  if (!s) return '—';
+  const d = parse(s), n = new Date(), y = new Date(n.getTime() - D);
+  const same = (a, b) => a.toDateString() === b.toDateString();
+  return same(d, n) ? `today ${clock(s)}` : same(d, y) ? `yesterday ${clock(s)}` : `${MON[d.getMonth()]} ${d.getDate()}, ${clock(s)}`;
+}
+const listOf = a => a.length < 2 ? (a[0] || '') : a.slice(0, -1).join(', ') + ' and ' + a[a.length - 1];
+const schema = html => `<span class="schema-only font-mono text-[11px] text-ink/45">${html}</span>`;
+
+function setSidebar(open) {
+  sidebarOpen = open;
+  $('#sidebar').classList.toggle('-translate-x-full', !open);
+  $('#sidebar').classList.toggle('translate-x-0', open);
+  $('#sidebarBackdrop').classList.toggle('hidden', !open);
+}
+
+function renderAll() {
+  applySchema();
+  const u = me();
+  $('#loginView').classList.toggle('hidden', !!u);
+  $('#appView').classList.toggle('hidden', !u);
+  if (!u) return;
+  const t = TABS.find(x => x.id === activeTab);
+  if (!t || (t.perm && !can(t.perm))) activeTab = 'starters';
+  renderSidebar();
+  const view = { starters: viewStarters, batches: viewBatches, stock: viewStock, users: viewUsers }[activeTab];
+  $('#main').innerHTML = pageHead() + view();
+  if (activeTab === 'stock') renderCalcResult();
+}
+
+/* ---------- Sidebar: the only navigation ---------- */
+function renderSidebar() {
+  const u = me(), low = lowStockCount(), active = db.batch.filter(b => stageOf(b) < 3).length;
+  const hungry = db.starter.filter(s => starterStatus(s).label === 'Hungry').length;
+  const note = { starters: hungry ? `<span class="text-accent">${hungry} hungry</span>` : db.starter.length,
+                 batches: active ? `${active} on the go` : db.batch.length,
+                 stock: low ? `<span class="text-accent">${low} low</span>` : 'stocked',
+                 users: db.user.length };
+  $('#sideNav').innerHTML = `<ul class="pl-[22px] space-y-1">${TABS.filter(t => !t.perm || can(t.perm)).map(t => `
+    <li><button type="button" class="nav-a ${t.id === activeTab ? 'on' : ''}" data-action="nav" data-tab="${t.id}">
+      <span class="font-serif">${t.label}</span> <span class="text-xs text-ink/45 tnum ml-1">${note[t.id]}</span></button></li>`).join('')}</ul>
+    <div class="schema-only mt-10 text-[12px] text-ink/50 leading-relaxed">
+      <p class="label">Under the hood</p>
+      <p class="mt-1 font-mono">Express API → MySQL <span class="text-ink/70">sourdough</span></p>
+      <p class="font-mono">session role: ${esc(me().role)}</p>
+    </div>`;
+  $('#sideFoot').innerHTML = `${can('schema.view') ? `
+    <label class="flex items-center gap-2.5 cursor-pointer select-none py-1">
+      <input type="checkbox" id="schemaToggle" class="sr-only" ${showSchema ? 'checked' : ''}>
+      <span class="w-3.5 h-3.5 border border-ink/60 grid place-items-center">${showSchema ? '<span class="w-2 h-2 bg-accent"></span>' : ''}</span>
+      <span class="text-ink/75">Show schema</span>
+    </label>` : ''}
+    <div class="${can('schema.view') ? 'rule mt-4 pt-4' : ''}">
+      <p class="text-ink/50">Signed in as</p>
+      <p class="font-serif text-lg leading-tight">${esc(u.username)} <span class="text-xs font-sans text-ink/50">${esc(u.role)}</span></p>
+      <div class="flex gap-4 mt-3"><button type="button" class="link" data-action="logout">Log out</button></div>
+    </div>`;
+}
+
+/* ---------- Page head: date, title, one sentence of what needs attention ---------- */
+function attentionSentence() {
+  const sts = db.starter.map(s => ({ s, st: starterStatus(s) }));
+  const by = l => sts.filter(x => x.st.label === l);
+  const parts = [];
+  const hungry = by('Hungry'), unfed = by('Not fed'), ready = by('Ready'), rising = by('Rising');
+  if (hungry.length) parts.push(`<span class="text-accent">feed ${listOf(hungry.map(x => esc(x.s.name)))}</span>`);
+  if (unfed.length) parts.push(`give ${listOf(unfed.map(x => esc(x.s.name)))} a first feeding`);
+  if (ready.length) parts.push(`${listOf(ready.map(x => esc(x.s.name)))} ${ready.length > 1 ? 'are' : 'is'} at peak and ready to mix`);
+  db.batch.filter(b => stageOf(b) < 3).forEach(b => {
+    const s = stageOf(b), since = [b.mix_time, b.bulk_ferment_start, b.cold_proof_start][s];
+    parts.push(`bake No. ${b.id} has been ${['mixed', 'in bulk ferment', 'in cold proof'][s]} since ${when(since)}`);
+  });
+  db.ingredient.filter(i => stockOf(i.id).stock <= (i.reorder ?? -1)).forEach(i =>
+    parts.push(`<span class="text-accent">only ${fmtQ(stockOf(i.id).stock)}&nbsp;${i.unit} of ${esc(i.name.toLowerCase())} left</span>`));
+  if (rising.length) parts.push(`${listOf(rising.map(x => `${esc(x.s.name)} ${x.st.hint.toLowerCase()}`))}`);
+  if (!parts.length) return 'Nothing needs you today — the starters are resting and the pantry is full.';
+  return 'Today, ' + parts.join('; ') + '.';
+}
+function pageHead() {
+  const t = TABS.find(x => x.id === activeTab);
+  return `<header>
+    <p class="text-[11px] uppercase tracking-[.22em] text-ink/50">${today()} · <span class="text-accent">${ROLE_VIEW[me().role] || ''}</span></p>
+    <h1 class="h-serif text-4xl sm:text-5xl mt-2">${t.title}</h1>
+    <p class="font-serif text-lg sm:text-xl leading-relaxed text-ink/85 mt-5 max-w-3xl">${attentionSentence()}</p>
+  </header>`;
+}
+
+/* ---------- Shared bits ---------- */
+const section = (title, right, body, first = false) => `<section class="${first ? 'mt-10' : 'mt-14'}">
+  <div class="flex flex-wrap items-end justify-between gap-x-6 gap-y-2 border-b border-ink/70 pb-2"><h2 class="h-serif text-2xl">${title}</h2><div class="flex flex-wrap items-center gap-x-5 gap-y-2">${right}</div></div>${body}</section>`;
+const filterLinks = (action, cur, opts) => `<span class="text-[13px] text-ink/50">Show</span>` + opts.map(([k, l]) =>
+  `<button type="button" data-action="${action}" data-f="${k}" class="text-[13px] ${cur === k ? 'text-accent underline decoration-accent underline-offset-4' : 'text-ink/60 hover:text-ink'}">${l}</button>`).join('');
+const table = (head, rows, empty, cols) => `<div class="overflow-x-auto scroll-thin"><table class="w-full text-sm">
+  <thead><tr class="border-b border-ink/25">${head}</tr></thead>
+  <tbody>${rows || `<tr><td colspan="${cols}" class="py-6 text-ink/45 font-serif italic">${empty}</td></tr>`}</tbody></table></div>`;
+const th = (l, cls = '') => `<th class="th ${cls}">${l}</th>`;
+const tr = cells => `<tr class="border-b border-ink/10 align-baseline">${cells}</tr>`;
+const td = (v, cls = '') => `<td class="td ${cls}">${v}</td>`;
+
+/* ---------- Jar ---------- */
+const BAND = 0.40, PEAK = 0.86;
+function jarState(s) {
+  const f = lastFeeding(s.id);
+  if (!f) return { lvl: 0.18, band: null };
+  if (!f.peak_time) return { lvl: BAND + 0.08, band: BAND };
+  const now = Date.now(), t0 = parse(f.feed_time).getTime(), tp = parse(f.peak_time).getTime();
+  if (now < tp) { const r = Math.max(0, Math.min(1, (now - t0) / (tp - t0))); return { lvl: BAND + (PEAK - BAND) * r, band: BAND, rise: r }; }
+  if (now - tp <= PEAK_WINDOW_H * H) return { lvl: PEAK, band: BAND, rise: 1 };
+  return { lvl: 0.6, band: BAND, fallen: true };
+}
+function jarSVG(s, st) {
+  const { lvl, band, fallen } = jarState(s);
+  const top = 30, h = 122, y = top + h * (1 - lvl), peakY = top + h * (1 - PEAK), bandY = band != null ? top + h * (1 - band) : null;
+  const c = st.label === 'Hungry' ? '#8B4A2B' : '#2A211B';
+  const body = 'M24 36 Q24 28 32 28 L88 28 Q96 28 96 36 L96 146 Q96 154 88 154 L32 154 Q24 154 24 146 Z';
+  const bubbles = lvl > 0.25 ? [[36, 0.25], [52, 0.55], [70, 0.35], [83, 0.7], [44, 0.8], [64, 0.85], [78, 0.15]]
+    .map(([x, k], i) => `<circle cx="${x}" cy="${(y + 7 + (152 - y - 10) * k).toFixed(1)}" r="${1.4 + (i % 3) * 0.6}" fill="none" stroke="${c}" stroke-opacity=".45" stroke-width=".9"/>`).join('') : '';
+  return `<svg viewBox="0 0 120 160" class="w-[92px] h-[122px] shrink-0" role="img" aria-label="${esc(s.name)}: ${Math.round(lvl * 100)}% of the jar">
+    <defs><clipPath id="jar${s.id}"><path d="${body}"/></clipPath></defs>
+    <path d="M34 10 H86 V22 H34 Z" fill="none" stroke="#2A211B" stroke-width="1.4"/>
+    <path d="M38 22 V28 M82 22 V28" stroke="#2A211B" stroke-width="1.4"/>
+    <g clip-path="url(#jar${s.id})">
+      ${fallen ? `<path d="M20 ${peakY} H100" stroke="#2A211B" stroke-opacity=".35" stroke-width="1" stroke-dasharray="1.5 2.5"/><path d="M20 ${peakY + 4} H100" stroke="#2A211B" stroke-opacity=".2" stroke-width="1" stroke-dasharray="1 4"/>` : ''}
+      <rect class="jar-fill" x="20" y="${y.toFixed(1)}" width="80" height="${(160 - y).toFixed(1)}" fill="${c}" fill-opacity=".13"/>
+      <path d="M20 ${y.toFixed(1)} q7.5 -2.4 15 0 t15 0 t15 0 t15 0 t15 0 t15 0" fill="none" stroke="${c}" stroke-width="1.3"/>
+      ${bubbles}
+    </g>
+    <path d="${body}" fill="none" stroke="#2A211B" stroke-width="1.5"/>
+    <path d="M96 ${peakY} H103" stroke="#2A211B" stroke-width="1"/><text x="104" y="${peakY + 2.5}" font-size="7.5" font-family="IBM Plex Sans" fill="#2A211B" fill-opacity=".6">peak</text>
+    ${bandY != null ? `<path d="M22 ${bandY} H98" stroke="#8B4A2B" stroke-width="3" stroke-linecap="round"/>` : ''}
+  </svg>`;
+}
+
+/* ---------- Starters ---------- */
+function viewStarters() {
+  const jars = db.starter.map(starterEntry).join('');
+  const feeds = [...db.feeding].sort((a, b) => b.feed_time.localeCompare(a.feed_time));
+  const rows = feeds.map(f => tr(
+    td(`${when(f.feed_time)}`) + td(`${esc(starterName(f.starter_id))} <span class="font-sans text-xs text-ink/50">by ${esc(f.logged_by)}</span>`, 'font-serif text-[15px]')
+    + td(f.temp != null ? `${fmtQ(f.temp)}°C` : '—', 'text-right tnum') + td(when(f.peak_time), 'text-ink/65')
+    + td(`+${fmtQ(f.qty_added_g)} g`, 'text-right tnum') + td(schema(`(${f.starter_id}, '${esc(f.feed_time.slice(0, 16))}')`), 'schema-only')
+  )).join('');
+  return section('On the shelf',
+      `<button type="button" class="link" data-action="new-starter">New starter</button><button type="button" class="btn-primary" data-action="feed">Log a feeding</button>`,
+      db.starter.length ? `<div class="grid sm:grid-cols-2 xl:grid-cols-3 gap-x-10 gap-y-10 mt-8">${jars}</div>
+        <p class="text-xs text-ink/45 mt-8 font-serif italic">The band marks the level at feeding; the jar fills as the starter rises toward its peak line.</p>`
+        : `<p class="py-8 font-serif italic text-ink/50">No starters yet — begin one with “New starter”.</p>`, true)
+    + section('Feeding log', `<span class="text-xs text-ink/45">${feeds.length} entries</span>`,
+      table(th('Fed') + th('Starter') + th('Temp', 'text-right') + th('Peak') + th('Food', 'text-right') + th('Key <span class="normal-case tracking-normal">(starter_id, feed_time)</span>', 'schema-only'),
+        rows, 'No feedings written down yet.', 6));
+}
+function starterEntry(s) {
+  const st = starterStatus(s), f = lastFeeding(s.id), res = starterReserve(s.id), low = res < s.min_weight_g;
+  const stampCls = { Ready: 'stamp-ink', Hungry: 'stamp-acc' }[st.label] || 'stamp-faint';
+  return `<article class="flex gap-5">
+    ${jarSVG(s, st)}
+    <div class="min-w-0 pt-1">
+      <span class="stamp ${stampCls}">${st.label === 'Ready' ? 'Ready' : st.label === 'Not fed' ? 'Unfed' : st.label}</span>
+      <h3 class="h-serif text-xl leading-snug mt-3"><button type="button" class="text-left hover:underline decoration-ink/30 underline-offset-4" data-action="starter-detail" data-id="${s.id}">${esc(s.name)}</button></h3>
+      <p class="text-[13px] text-ink/60 mt-1">${esc(s.flour_type)} · ${fmtQ(s.hydration)}% · ${ageDays(s.born)} days old</p>
+      <p class="text-[13px] text-ink/80 mt-2">${f ? `Fed ${when(f.feed_time)}${f.temp != null ? ` at ${fmtQ(f.temp)}°C` : ''}.` : 'Never fed.'} ${esc(st.hint)}.</p>
+      <p class="text-[13px] mt-1 ${low ? 'text-accent' : 'text-ink/60'}">About ${fmtQ(res)} g in the jar${low ? ` — under the ${fmtQ(s.min_weight_g)} g you keep back` : ''}.</p>
+      ${schema(`<span class="block mt-1">starter #${s.id} · reserve = SUM(feeding.qty_added_g) − SUM(batch.qty_removed_g)</span>`)}
+      <div class="flex flex-wrap gap-x-4 gap-y-1 mt-3">
+        <button type="button" class="link-accent" data-action="feed" data-id="${s.id}">Feed</button>
+        <button type="button" class="link" data-action="bake" data-id="${s.id}">Bake with it</button>
+        <button type="button" class="link" data-action="edit-starter" data-id="${s.id}">Edit</button>
+        <button type="button" class="link !text-ink/45" data-action="delete-starter" data-id="${s.id}">Remove</button>
+      </div>
+    </div>
+  </article>`;
+}
+
+/* ---------- Bakes ---------- */
+const STAGE_WORD = ['Mixing', 'Bulk', 'Cold proof', 'Baked'];
+const STAGE_DONE = ['Mixed', 'Bulk ferment', 'Cold proof', 'Baked'];
+const NEXT_WORD = ['Start bulk ferment', 'Move to cold proof', 'Mark as baked'];
+function viewBatches() {
+  const all = [...db.batch].sort((a, b) => b.mix_time.localeCompare(a.mix_time));
+  const counts = [0, 0, 0, 0]; all.forEach(b => counts[stageOf(b)]++);
+  const list = all.filter(b => batchFilter === 'all' || String(stageOf(b)) === batchFilter);
+  const filters = filterLinks('batch-filter', batchFilter, [['all', `All ${all.length}`], ...STAGE_DONE.map((s, i) => [String(i), `${s} ${counts[i]}`])]);
+  return section('The bake book', `<button type="button" class="btn-primary" data-action="new-batch">Start a bake</button>`,
+      `<div class="flex flex-wrap gap-x-4 gap-y-1 mt-4">${filters}</div>
+       <div class="mt-4">${list.length ? list.map(batchEntry).join('') : `<p class="py-8 font-serif italic text-ink/50 border-t border-ink/15">${all.length ? 'Nothing at this stage.' : 'No bakes yet — start one when a starter is ready.'}</p>`}</div>`, true);
+}
+function batchEntry(b) {
+  const s = stageOf(b);
+  const items = db.stock_movement.filter(m => m.batch_id === b.id).map(m => ({ m }));
+  const times = [b.mix_time, b.bulk_ferment_start, b.cold_proof_start, b.cold_proof_end];
+  const steps = STAGE_DONE.map((name, i) => {
+    const done = i <= s, cur = i === s && s < 3;
+    return `<li class="flex-1 min-w-[96px] pt-2 border-t-2 ${done ? (cur ? 'border-accent' : 'border-ink') : 'border-ink/15 border-dashed'}">
+      <span class="block text-[11px] uppercase tracking-[.14em] ${done ? (cur ? 'text-accent' : 'text-ink/70') : 'text-ink/35'}">${name}</span>
+      <span class="block text-[13px] tnum ${done ? 'text-ink' : 'text-ink/30'}">${done ? when(times[i]) : '—'}</span></li>`;
+  }).join('');
+  const used = items.map(({ m }) => { const ing = db.ingredient.find(i => i.id === m.ingredient_id); return `${esc((ing?.name ?? '#' + m.ingredient_id).toLowerCase())} ${fmtQ(m.qty)} ${ing?.unit ?? ''}`; });
+  const stamp = s === 3 ? '<span class="stamp stamp-ink">Baked</span>' : `<span class="stamp stamp-faint">${STAGE_WORD[s]}</span>`;
+  return `<article class="py-7 border-t border-ink/15 grid sm:grid-cols-[120px_1fr_auto] gap-x-8 gap-y-3">
+    <div><p class="h-serif text-3xl leading-none">No. ${b.id}</p><p class="text-xs text-ink/50 mt-2">mixed ${when(b.mix_time)}</p></div>
+    <div class="min-w-0">
+      <p class="text-[15px]"><span class="font-medium">${b.loaf_count} loaves</span> from <span class="font-serif italic">${esc(starterName(b.starter_id))}</span>, using ${fmtQ(b.qty_removed_g)} g of starter. <span class="text-[13px] text-ink/50">Baked by ${esc(b.baked_by)}.</span></p>
+      <ol class="flex flex-wrap gap-x-3 gap-y-3 mt-4">${steps}</ol>
+      <p class="text-[13px] text-ink/60 mt-4">${used.length ? `Took ${listOf(used)}.` : 'No ingredients recorded.'}</p>
+      ${schema(`<span class="block mt-1">batch.id ${b.id} · FK feeding (${b.starter_id}, '${esc(b.feeding_time.slice(0, 16))}') · stock_movement.batch_id = ${b.id}: ${items.map(x => '#' + x.m.id).join(', ') || '—'}</span>`)}
+    </div>
+    <div class="flex sm:flex-col items-center sm:items-end gap-x-5 gap-y-3">
+      ${stamp}
+      ${s < 3 ? `<button type="button" class="link-accent" data-action="advance" data-id="${b.id}">${NEXT_WORD[s]} →</button>` : ''}
+      <button type="button" class="link !text-ink/45" data-action="delete-batch" data-id="${b.id}">Delete</button>
+    </div>
+  </article>`;
+}
+
+/* ---------- Pantry ---------- */
+const STOCK_WORD = { 'In Stock': ['Stocked', 'stamp-faint'], 'Running Low': ['Running low', 'stamp-faint'], 'Low Stock': ['Low', 'stamp-acc'], 'Out of Stock': ['Out', 'stamp-acc'] };
+function viewStock() {
+  const rows = db.ingredient.map(i => {
+    const { restock, consumed, stock } = stockOf(i.id), st = stockStatus(stock, i.reorder), [word, cls] = STOCK_WORD[st.label];
+    const scale = Math.max((i.reorder || 0) * 2.5, 1), pct = Math.max(0, Math.min(100, stock / scale * 100)), mark = i.reorder ? Math.min(100, i.reorder / scale * 100) : null;
+    const low = cls === 'stamp-acc';
+    return tr(
+      td(`<span class="font-serif text-[15px]">${esc(i.name)}</span>${schema(` <span class="ml-1">#${i.id}</span>`)}`)
+      + td(`<span class="${low ? 'text-accent' : ''}">${fmtQ(stock)}</span> <span class="text-ink/50">${esc(i.unit)}</span>`, 'text-right tnum')
+      + td(`<div class="relative h-[3px] w-28 bg-ink/10 mt-1.5"><div class="h-full ${low ? 'bg-accent' : 'bg-ink/70'}" style="width:${pct}%"></div>${mark != null ? `<div class="absolute -top-[4px] w-px h-[11px] bg-ink" style="left:${mark}%" title="reorder line"></div>` : ''}</div>`)
+      + td(`${i.reorder != null ? fmtQ(i.reorder) : '—'} <span class="text-ink/50">${esc(i.unit)}</span>${can('reorder.update') ? ` <button type="button" class="link !text-xs ml-1" data-action="edit-reorder" data-id="${i.id}">edit</button>` : ''}`, 'text-right tnum text-ink/70')
+      + td(word === 'Stocked' ? '<span class="text-xs text-ink/40">stocked</span>' : `<span class="stamp ${cls}">${word}</span>`)
+      + td(`<span class="text-xs text-ink/50 tnum">in ${fmtQ(restock)} · out ${fmtQ(consumed)}</span>`, 'text-right')
+      + td(can('restock') ? `<button type="button" class="link" data-action="restock" data-id="${i.id}">Restock</button>` : '', 'text-right !pr-0'));
+  }).join('');
+  const recipe = Object.keys(calc.per).map(id => {
+    const ing = db.ingredient.find(i => i.id === +id); if (!ing) return '';
+    return `<label class="flex items-baseline gap-2 text-[13px]"><span class="w-44 truncate text-ink/70">${esc(ing.name)}</span><input type="number" min="0" step="any" class="input !w-16 text-right tnum" data-calc="per" data-id="${id}" value="${calc.per[id]}"><span class="text-ink/50">${ing.unit} a loaf</span></label>`;
+  }).join('');
+  return section('On the shelves',
+      can('restock') ? `${can('ingredient.write') ? '<button type="button" class="link" data-action="new-ingredient">New ingredient</button>' : ''}${can('waste') ? '<button type="button" class="link" data-action="waste">Record waste</button>' : ''}<button type="button" class="btn-primary" data-action="restock">Record a delivery</button>` : `<span class="text-[13px] text-ink/50 font-serif italic">Read only — deliveries and ingredients are managed by an admin.</span>`,
+      table(th('Ingredient') + th('On hand', 'text-right') + th('') + th('Reorder at', 'text-right') + th('') + th('Movement', 'text-right') + th(''), rows, 'The pantry is empty — reset the demo data.', 7)
+      + schema('<span class="block mt-2">on hand = SUM(restock) − SUM(consumption) over stock_movement</span>'), true)
+    + section('Can I bake today?', '',
+      `<p class="font-serif text-lg mt-5 leading-relaxed">If I bake <input id="calcLoaves" type="number" min="0" step="1" class="input !w-14 !inline-block text-center !text-lg font-serif tnum" data-calc="loaves" value="${calc.loaves}"> loaves, <span id="calcBadge"></span></p>
+       <div id="calcResult" class="mt-3"></div>
+       <details class="mt-4"><summary class="link inline-block">Change the per-loaf recipe</summary><div class="mt-3 space-y-2">${recipe}</div></details>`)
+    + (can('ledger.view') ? `<div id="ledger">${ledgerSection()}</div>` : '');
+}
+function renderCalcResult() {
+  const box = $('#calcResult'); if (!box) return;
+  const n = Math.max(0, Math.floor(Number(calc.loaves) || 0));
+  let ok = true, maxLoaves = Infinity;
+  box.innerHTML = `<ul class="max-w-xl">${Object.entries(calc.per).map(([id, per]) => {
+    const ing = db.ingredient.find(i => i.id === +id); if (!ing) return '';
+    const stock = stockOf(+id).stock, need = n * (+per || 0), enough = need <= stock;
+    if (!enough) ok = false;
+    if (+per > 0) maxLoaves = Math.min(maxLoaves, Math.floor(stock / per));
+    return `<li class="flex items-baseline gap-3 py-1.5 border-b border-ink/10 text-[13px]"><span class="flex-1 text-ink/80">${esc(ing.name)}</span>
+      <span class="tnum">${fmtQ(need)} ${ing.unit}</span><span class="w-36 text-right tnum ${enough ? 'text-ink/50' : 'text-accent'}">${enough ? `of ${fmtQ(stock)} on hand` : `short by ${fmtQ(need - stock)}`}</span></li>`;
+  }).join('')}</ul>`;
+  $('#calcBadge').innerHTML = ok ? `there is enough on the shelves <span class="text-ink/50">— at most ${Number.isFinite(maxLoaves) ? maxLoaves : '—'} loaves today.</span>`
+    : `<span class="text-accent">the shelves come up short</span> <span class="text-ink/50">— at most ${Number.isFinite(maxLoaves) ? maxLoaves : '—'} loaves today.</span>`;
+}
+function ledgerSection() {
+  const rows = [...db.stock_movement].filter(m => ledgerFilter === 'all' || m.movement_type === ledgerFilter)
+    .sort((a, b) => b.movement_date.localeCompare(a.movement_date) || b.id - a.id);
+  const body = rows.map(m => {
+    const ing = db.ingredient.find(i => i.id === m.ingredient_id), isR = m.movement_type === 'restock';
+    const sub = isR ? db.restock_movement.find(r => r.id === m.id) : db.consumption_movement.find(c => c.id === m.id);
+    return tr(
+      td(String(m.id).padStart(3, '0'), 'font-mono text-xs text-ink/50')
+      + td(when(m.movement_date), 'text-ink/70')
+      + td(esc(ing?.name ?? '#' + m.ingredient_id))
+      + td(`<span class="font-mono ${isR ? '' : 'text-accent'}">${isR ? '+' : '−'}${fmtQ(m.qty)}</span> <span class="text-ink/50">${esc(ing?.unit ?? '')}</span>`, 'text-right')
+      + td(isR ? '<span class="text-ink/70">Delivery</span>' : m.batch_id ? `<span class="text-ink/70">Used in bake No. ${m.batch_id}</span>` : `<span class="text-accent">${esc(sub?.reason ?? '—')}</span>`)
+      + td(esc(m.recorded_by), 'text-ink/70')
+      + td(isR && sub?.cost != null ? `<span class="font-mono text-xs">${fmtMoney(sub.cost)}</span>` : '', 'text-right !pr-0')
+      + td(schema(`${isR ? 'restock_movement' : 'consumption_movement'}.id = ${m.id}`), 'schema-only'));
+  }).join('');
+  return section('Stock ledger', filterLinks('ledger-filter', ledgerFilter, [['all', 'All'], ['restock', 'In'], ['consumption', 'Out']]),
+    `<div class="max-h-[520px] overflow-y-auto scroll-thin">${table(th('No.') + th('When') + th('Ingredient') + th('Qty', 'text-right') + th('Note') + th('By') + th('Cost paid', 'text-right') + th('Subtype row', 'schema-only'), body, 'No movements.', 8)}</div>`);
+}
+
+/* ---------- Bakers (admin) ---------- */
+function viewUsers() {
+  const rows = db.user.map(u => tr(
+    td(`<span class="font-serif text-[15px]">${esc(u.username)}</span>${u.id === session.id ? ' <span class="text-xs text-ink/45">(you)</span>' : ''}${schema(` <span class="ml-1">#${u.id}</span>`)}`)
+    + td(esc(u.role), 'text-ink/70')
+    + td(u.created_at ? fmtDate(u.created_at) : '—', 'text-ink/55')
+    + td(`<button type="button" class="link" data-action="edit-user" data-id="${u.id}">Edit</button> <button type="button" class="link !text-ink/45 ml-3" data-action="delete-user" data-id="${u.id}">Remove</button>`, 'text-right !pr-0'))).join('');
+  return section('Who keeps this book', `<button type="button" class="btn-primary" data-action="new-user">Add a baker</button>`,
+      table(th('Name') + th('Role') + th('Joined') + th(''), rows, 'No accounts.', 4), true)
+    + section('Who may do what', '', `<div class="mt-2">${permMatrix()}</div>`);
+}
+function permMatrix() {
+  const role = me()?.role, roles = ['user', 'admin', 'developer'];
+  return table(th('Action') + roles.map(r => th(r, `text-center ${r === role ? '!text-accent' : ''}`)).join(''),
+    Object.keys(PERMS).map(p => tr(td(esc(PERM_LABEL[p]), 'text-ink/80') + roles.map(r => td(PERMS[p].includes(r) ? '✓' : '<span class="text-ink/25">—</span>', 'text-center')).join(''))).join(''), '', 4);
+}
+
+
+/* =====================================================================
+   9. MODALS (forms)
+   ===================================================================== */
+const field = (label, inner, cls = '') => `<div class="${cls}"><label class="label">${String(label).replace(/\s*\(([^)]*(?:FK|PK|_|→)[^)]*)\)/g, ' <span class="schema-only normal-case tracking-normal font-mono text-ink/40">($1)</span>')}</label>${inner}</div>`;
+
+/* Read one starter: GET /starters/:id, plus its feedings */
+async function openStarterDetail(id) {
+  let s;
+  try { s = await getStarter(id); } catch (e) { handleError(e); return; }
+  const feeds = feedingsOf(id), res = starterReserve(id);
+  const row = (k, v) => `<div class="flex justify-between gap-4 py-1.5 border-b border-ink/10"><dt class="text-ink/55">${k}</dt><dd class="text-right">${v}</dd></div>`;
+  openModal({
+    title: esc(s.name), subtitle: `GET /starters/${s.id} → SELECT * FROM starter WHERE id = ?`, footer: false,
+    body: `<dl class="text-sm">
+        ${row('Starter ID', '#' + s.id)}${row('Flour', esc(s.flour_type))}${row('Hydration', s.hydration + '%')}
+        ${row('Born', fmtDate(s.born) + ` (${ageDays(s.born)} days)`)}${row('Keep back at least', fmtQ(s.min_weight_g) + ' g')}
+        ${row('About in the jar now', fmtQ(res) + ' g')}${row('Feedings written down', feeds.length)}
+      </dl>
+      <p class="label mt-5">Feeding history</p>
+      <ul class="text-[13px] mt-1">${feeds.map(f => `<li class="flex justify-between py-1 border-b border-ink/10"><span>${when(f.feed_time)} <span class="text-ink/50">by ${esc(f.logged_by)}</span></span><span class="tnum">${f.temp != null ? fmtQ(f.temp) + '°C · ' : ''}+${fmtQ(f.qty_added_g)} g</span></li>`).join('') || '<li class="py-1 text-ink/45 font-serif italic">None yet.</li>'}</ul>
+      <div class="flex justify-end items-center gap-5 mt-6"><button type="button" class="btn-ghost" data-close>Close</button><button type="button" class="btn-primary" data-b="edit">Edit</button></div>`,
+    onMount(root, close) { $('[data-b=edit]', root).addEventListener('click', () => { close(); openStarterEditModal(s.id); }); },
+  });
+}
+
+/* Update one starter: PUT /starters/:id */
+function openStarterEditModal(id) {
+  if (!guard('starter.write')) return;
+  const s = db.starter.find(x => x.id === id);
+  openModal({
+    title: 'Edit starter', subtitle: `PUT /starters/${id} → UPDATE starter SET name = ?, flour_type = ?, hydration = ?, born = ?, min_weight_g = ? WHERE id = ?`, submitLabel: 'Save changes',
+    body: `<div class="grid sm:grid-cols-2 gap-3">
+      ${field('Starter name *', `<input name="name" class="input" maxlength="45" value="${esc(s.name)}">`, 'sm:col-span-2')}
+      ${field('Flour type *', `<input name="flour_type" class="input" maxlength="45" value="${esc(s.flour_type)}">`)}
+      ${field('Hydration (%) *', `<input name="hydration" type="number" step="1" min="1" class="input" value="${s.hydration}">`)}
+      ${field('Born *', `<input name="born" type="date" class="input" value="${esc(s.born)}" max="${toSqlDate(Date.now())}">`)}
+      ${field('Min reserve (g) *', `<input name="min_weight_g" type="number" step="1" min="0" class="input" value="${s.min_weight_g}">`)}
+    </div>`,
+    onSubmit(form, errEl) {
+      const f = Object.fromEntries(new FormData(form));
+      return run(() => updateStarter(id, f), { errEl, ok: () => toast('success', 'Starter updated', f.name.trim()) }).then(r => r.ok);
+    },
+  });
+}
+
+function openStarterModal() {
+  if (!guard('starter.write')) return;
+  openModal({
+    title: 'New Starter', subtitle: 'POST /starters → INSERT INTO starter (name, flour_type, hydration, born, min_weight_g) VALUES (?, ?, ?, ?, ?)', submitLabel: 'Create Starter',
+    body: `<div class="grid sm:grid-cols-2 gap-3">
+      ${field('Starter name *', `<input name="name" class="input" maxlength="45" placeholder="e.g. Tartine Country Levain">`, 'sm:col-span-2')}
+      ${field('Flour type *', `<input name="flour_type" class="input" maxlength="45" list="flourList" placeholder="e.g. Unbleached Bread Flour"><datalist id="flourList"><option>Unbleached Bread Flour</option><option>Dark Rye Flour</option><option>Stoneground Whole Wheat</option><option>Spelt Flour</option></datalist>`)}
+      ${field('Hydration (%) *', `<input name="hydration" type="number" step="1" min="1" class="input" value="100">`)}
+      ${field('Born', `<input name="born" type="date" class="input" value="${toSqlDate(Date.now())}" max="${toSqlDate(Date.now())}">`)}
+      ${field('Min reserve (g) *', `<input name="min_weight_g" type="number" step="1" min="0" class="input" value="150">`)}
+    </div>`,
+    onSubmit(form, errEl) {
+      const f = Object.fromEntries(new FormData(form));
+      return run(() => createStarter(f), { errEl, ok: id => toast('success', 'Starter created', `${f.name.trim()} saved as starter #${id}.`) }).then(r => r.ok);
+    },
+  });
+}
+
+function openFeedModal(preId) {
+  if (!guard('feeding.write')) return;
+  if (!db.starter.length) return toast('warn', 'No starters', 'Create a starter first.');
+  const now = Date.now();
+  openModal({
+    title: 'Feed Starter', subtitle: 'POST /starters/:id/feedings → INSERT INTO feeding (starter_id, feed_time, temp, peaktime, qty_added_g, user_id) VALUES (?, ?, ?, ?, ?, ?)', submitLabel: 'Log Feeding',
+    body: `<div class="grid sm:grid-cols-2 gap-3">
+      ${field('Starter (FK → starter.id) *', `<select name="starter_id" class="input">${db.starter.map(s => `<option value="${s.id}" ${s.id === preId ? 'selected' : ''}>#${s.id} · ${esc(s.name)}</option>`).join('')}</select>`, 'sm:col-span-2')}
+      ${field('Feed time (part of PK) *', `<input name="feed_time" type="datetime-local" class="input" value="${toInput(toSql(now))}">`)}
+      ${field('Food added (g) *', `<input name="qty_added_g" type="number" min="1" step="1" class="input" placeholder="e.g. 300">`)}
+      ${field('Ambient temp (°C)', `<input name="temp" type="number" step="0.1" class="input" placeholder="e.g. 26.5">`)}
+      ${field('Expected peak time', `<input name="peak_time" type="datetime-local" class="input" value="${toInput(toSql(now + 6 * H))}">`)}
+    </div>
+    <p class="text-xs text-stone-500 mt-3">Peak time auto-fills to feed time + 6 h (warm Bangkok kitchen); adjust after watching the rise. <span class="schema-only font-mono text-[11px]">Composite key (starter_id, feed_time) must be unique.</span></p>`,
+    onMount(root) {
+      const ft = $('[name=feed_time]', root), pk = $('[name=peak_time]', root);
+      let touched = false; pk.addEventListener('input', () => touched = true);
+      ft.addEventListener('input', () => { if (!touched && ft.value) pk.value = toInput(toSql(parse(fromInput(ft.value)).getTime() + 6 * H)); });
+    },
+    onSubmit(form, errEl) {
+      const f = Object.fromEntries(new FormData(form));
+      return run(() => createFeeding(f), { errEl, ok: () => toast('success', 'Feeding logged', `${starterName(+f.starter_id)} fed +${f.qty_added_g} g.`) }).then(r => r.ok);
+    },
+  });
+}
+
+function openBatchModal(preStarter) {
+  if (!guard('batch.write')) return;
+  const withFeeds = db.starter.filter(s => feedingsOf(s.id).length);
+  if (!withFeeds.length) return toast('warn', 'No feedings yet', 'A batch must reference a feeding run — log a feeding first.');
+  const first = withFeeds.find(s => s.id === preStarter) || withFeeds[0];
+  openModal({
+    title: 'Start New Bread Batch', wide: true, submitLabel: 'Start Batch',
+    subtitle: 'POST /batches → CALL sp_add_batch_with_consumption(?, ?, ?, ?, ?, ?, @bid); SELECT @bid',
+    body: `<div class="grid sm:grid-cols-2 gap-3">
+      ${field('Starter culture (FK) *', `<select name="starter_id" class="input">${withFeeds.map(s => `<option value="${s.id}" ${s.id === first.id ? 'selected' : ''}>#${s.id} · ${esc(s.name)}</option>`).join('')}</select>`)}
+      ${field('Feeding run (FK → feeding PK) *', `<select name="feeding_time" class="input"></select>`)}
+      ${field('Loaf count *', `<input name="loaf_count" type="number" min="1" step="1" class="input" value="8">`)}
+      ${field('Starter removed (g) *', `<input name="qty_removed_g" type="number" min="1" step="1" class="input" value="180">`)}
+    </div>
+    <p id="reserveHint" class="text-xs mt-2"></p>
+    <div class="flex flex-wrap items-center justify-between gap-2 mt-5 mb-2">
+      <p class="h-serif text-lg">Ingredients consumed <span class="schema-only font-mono text-[11px] text-ink/40 font-normal">→ p_items JSON</span></p>
+      <div class="flex gap-2"><button type="button" class="btn-ghost !py-1.5" data-b="recipe">Fill from recipe</button>
+      <button type="button" class="btn-ghost !py-1.5" data-b="add">Add line</button></div>
+    </div>
+    <div id="itemRows" class="space-y-2"></div>
+    <div id="batchSummary" class="mt-3"></div>
+    <p class="schema-only font-mono text-[11px] text-ink/45 mt-3">Every line fires trg_stock_no_negative; if any line fails, the procedure rolls back the batch and all its movements (409). Cost is stored as whole baht.</p>`,
+    onMount(root) {
+      const sSel = $('[name=starter_id]', root), fSel = $('[name=feeding_time]', root), rowsBox = $('#itemRows', root);
+      const fillFeeds = () => {
+        fSel.innerHTML = feedingsOf(+sSel.value).map((f, i) => `<option value="${esc(f.feed_time)}">${fmtDT(f.feed_time)} · +${fmtQ(f.qty_added_g)} g${i === 0 ? ' (latest)' : ''}</option>`).join('');
+      };
+      const addRow = (it = {}) => { rowsBox.insertAdjacentHTML('beforeend', itemRowHTML(it)); };
+      const recipe = () => {
+        const n = Math.max(1, Math.floor(+$('[name=loaf_count]', root).value || 1));
+        const rye = /rye/i.test(db.starter.find(s => s.id === +sSel.value)?.flour_type || '');
+        const lines = rye ? [[2, 350], [1, 150], [5, 400], [4, 10]] : [[1, 450], [5, 320], [4, 10]];
+        rowsBox.innerHTML = '';
+        lines.filter(([id]) => db.ingredient.some(i => i.id === id)).forEach(([id, per]) => addRow({ ingredient_id: id, qty: per * n }));
+        update();
+      };
+      const update = () => updateBatchPreview(root);
+      sSel.addEventListener('change', () => { fillFeeds(); update(); });
+      root.addEventListener('input', () => update());
+      root.addEventListener('change', () => update());
+      root.addEventListener('click', e => {
+        const b = e.target.closest('[data-b], [data-f=rm]'); if (!b) return;
+        if (b.dataset.b === 'add') { addRow(); update(); }
+        if (b.dataset.b === 'recipe') recipe();
+        if (b.dataset.f === 'rm') { b.closest('.ing-row').remove(); update(); }
+      });
+      fillFeeds(); recipe();
+    },
+    onSubmit(form, errEl, root) {
+      const f = Object.fromEntries(new FormData(form));
+      const items = $$('.ing-row', root).map(r => ({ ingredient_id: $('[data-f=ing]', r).value, qty: $('[data-f=qty]', r).value }));
+      return run(() => spAddBatchWithConsumption(+f.starter_id, f.feeding_time, f.qty_removed_g, f.loaf_count, items),
+        { errEl, ok: id => { toast('success', `Bake No. ${id} started`, `${items.length} ingredient(s) taken from the pantry.`); activeTab = 'batches'; batchFilter = 'all'; renderAll(); } }).then(r => r.ok);
+    },
+  });
+}
+function itemRowHTML(it = {}) {
+  const opts = db.ingredient.map(i => `<option value="${i.id}" ${i.id === it.ingredient_id ? 'selected' : ''}>${esc(i.name)} (${i.unit})</option>`).join('');
+  return `<div class="ing-row border-b border-ink/15 py-2">
+    <div class="grid grid-cols-12 gap-2 items-center">
+      <select class="input col-span-12 sm:col-span-7" data-f="ing" aria-label="Ingredient"><option value="">Select ingredient…</option>${opts}</select>
+      <input class="input col-span-10 sm:col-span-4" type="number" min="0" step="any" placeholder="Qty" data-f="qty" aria-label="Quantity" value="${it.qty ?? ''}">
+      <button type="button" class="btn-icon col-span-2 sm:col-span-1" data-f="rm" title="Remove line" aria-label="Remove line">×</button>
+    </div><div class="preview text-xs mt-1.5 px-1"></div></div>`;
+}
+function updateBatchPreview(root) {
+  const used = {}; let bad = 0, lines = 0;
+  $$('.ing-row', root).forEach(r => {
+    const id = +$('[data-f=ing]', r).value, q = +$('[data-f=qty]', r).value || 0;
+    const p = $('.preview', r);
+    if (!id) { p.innerHTML = '<span class="text-stone-400">Choose an ingredient</span>'; return; }
+    lines++;
+    const ing = db.ingredient.find(i => i.id === id);
+    const avail = stockOf(id).stock - (used[id] || 0);
+    used[id] = (used[id] || 0) + q;
+    if (q > avail) { bad++; r.classList.add('!border-red-300', '!bg-red-50'); p.innerHTML = `<span class="text-red-700 font-bold">✕ ${fmtQ(q)} ${ing.unit} requested, only ${fmtQ(avail)} ${ing.unit} available<span class="schema-only"> — trg_stock_no_negative will SIGNAL 45000</span></span>`; }
+    else { r.classList.remove('!border-red-300', '!bg-red-50'); p.innerHTML = q > 0 ? `<span class="text-stone-500">Available ${fmtQ(avail)} ${ing.unit} → after <b class="${avail - q <= (ing.reorder ?? -1) ? 'text-amber-700' : 'text-emerald-700'}">${fmtQ(avail - q)} ${ing.unit}</b>${avail - q <= (ing.reorder ?? -1) ? ' (below reorder)' : ''}</span>` : '<span class="text-stone-400">Enter a quantity</span>'; }
+  });
+  $('#batchSummary', root).innerHTML = `<div class="rounded-xl border ${bad ? 'border-red-200 bg-red-50 text-red-800' : 'border-emerald-200 bg-emerald-50 text-emerald-800'} px-3 py-2 text-sm flex flex-wrap justify-between gap-2">
+    <span>${bad ? `<b>${bad} line(s) exceed stock.</b> Submitting will be rejected and the whole batch rolled back.` : `<b>Stock check passed</b> for ${lines} line(s).`}</span></div>`;
+  const sid = +$('[name=starter_id]', root).value, s = db.starter.find(x => x.id === sid);
+  const res = starterReserve(sid), rem = +$('[name=qty_removed_g]', root).value || 0, after = res - rem;
+  $('#reserveHint', root).innerHTML = s ? `<span class="${after < s.min_weight_g ? 'text-amber-700 font-semibold' : 'text-stone-500'}">Starter reserve ≈ ${fmtQ(res)} g → ${fmtQ(after)} g after removal (min ${fmtQ(s.min_weight_g)} g)${after < s.min_weight_g ? ' — below minimum, feed the starter soon' : ''}.</span>` : '';
+}
+
+/* Waste: POST /stock-movements/waste — a consumption with a reason and no bake */
+function openWasteModal(preId) {
+  if (!guard('waste')) return;
+  const opt = i => `<option value="${i.id}" ${i.id === preId ? 'selected' : ''}>${esc(i.name)} — ${fmtQ(stockOf(i.id).stock)} ${i.unit} on hand</option>`;
+  openModal({
+    title: 'Record waste', subtitle: 'POST /stock-movements/waste → transaction: INSERT stock_movement (batch_id NULL) + INSERT consumption_movement (reason)', submitLabel: 'Record Waste', submitClass: 'btn-danger',
+    body: `<div class="grid gap-3">
+      ${field('Ingredient *', `<select name="ingredient_id" class="input">${db.ingredient.map(opt).join('')}</select>`)}
+      ${field('Quantity thrown away *', `<div class="relative"><input name="qty" type="number" min="0" step="any" class="input pr-12" placeholder="e.g. 400"><span id="wUnit" class="absolute right-3 top-2 text-sm text-ink/40"></span></div>`)}
+      ${field('Reason *', `<input name="reason" class="input" maxlength="45" placeholder="e.g. Bag torn, flour spilled">`)}
+      <div class="flex flex-wrap gap-1.5">${['Spilled', 'Spoiled', 'Past its date', 'Pests'].map(x => `<button type="button" class="chip" data-reason="${x}">${x}</button>`).join('')}</div>
+      <p id="wPreview" class="text-sm"></p></div>`,
+    onMount(root) {
+      const sel = $('[name=ingredient_id]', root), qty = $('[name=qty]', root);
+      const upd = () => { const i = db.ingredient.find(x => x.id === +sel.value), s = stockOf(i.id).stock, q = +qty.value > 0 ? +qty.value : 0; $('#wUnit', root).textContent = i.unit;
+        $('#wPreview', root).innerHTML = q > s ? `<span class="text-accent">Only ${fmtQ(s)} ${i.unit} on hand — the database will refuse this.</span>` : `Stock now <b>${fmtQ(s)} ${i.unit}</b> → after <b>${fmtQ(s - q)} ${i.unit}</b>`; };
+      sel.addEventListener('change', upd); qty.addEventListener('input', upd);
+      root.addEventListener('click', e => { const b = e.target.closest('[data-reason]'); if (b) $('[name=reason]', root).value = b.dataset.reason; });
+      upd();
+    },
+    onSubmit(form, errEl) {
+      const f = Object.fromEntries(new FormData(form));
+      return run(() => recordWaste(+f.ingredient_id, f.qty, f.reason), { errEl, ok: () => {
+        const i = db.ingredient.find(x => x.id === +f.ingredient_id);
+        toast('success', 'Waste recorded', `−${fmtQ(f.qty)} ${i.unit} ${i.name}: ${f.reason.trim()}.`); } }).then(r => r.ok);
+    },
+  });
+}
+
+function openRestockModal(preId) {
+  if (!guard('restock')) return;
+  const opt = i => `<option value="${i.id}" ${i.id === preId ? 'selected' : ''}>${esc(i.name)} — ${fmtQ(stockOf(i.id).stock)} ${i.unit} on hand</option>`;
+  openModal({
+    title: 'Record a delivery', subtitle: 'POST /stock-movements/restock → CALL sp_record_restock(ingredient_id, qty, cost, user_id)', submitLabel: 'Record Delivery', submitClass: 'btn-green',
+    body: `<div class="grid gap-3">
+      ${field('Ingredient (FK) *', `<select name="ingredient_id" class="input">${db.ingredient.map(opt).join('')}</select>`)}
+      ${field('Quantity received *', `<div class="relative"><input name="qty" type="number" min="0" step="any" class="input pr-12 " placeholder="e.g. 10000"><span id="rUnit" class="absolute right-3 top-2 text-sm text-stone-400"></span></div>`)}
+      ${field('Cost paid (฿) *', `<input name="cost" type="number" min="0" step="0.01" class="input" placeholder="e.g. 875">`)}
+      <p id="rPreview" class="text-sm"></p></div>`,
+    onMount(root) {
+      const sel = $('[name=ingredient_id]', root), qty = $('[name=qty]', root);
+      const upd = () => { const i = db.ingredient.find(x => x.id === +sel.value); const s = stockOf(i.id).stock; $('#rUnit', root).textContent = i.unit;
+        $('#rPreview', root).innerHTML = `Stock now <b class="">${fmtQ(s)} ${i.unit}</b> → after <b class="text-emerald-700">${fmtQ(s + (+qty.value > 0 ? +qty.value : 0))} ${i.unit}</b> <span class="text-stone-400">(reorder at ${fmtQ(i.reorder ?? 0)})</span>`; };
+      sel.addEventListener('change', upd); qty.addEventListener('input', upd);
+      upd();
+    },
+    onSubmit(form, errEl) {
+      const f = Object.fromEntries(new FormData(form));
+      return run(() => spRecordRestock(+f.ingredient_id, f.qty, f.cost), { errEl, ok: () => {
+        const i = db.ingredient.find(x => x.id === +f.ingredient_id);
+        toast('success', 'Delivery recorded', `+${fmtQ(f.qty)} ${i.unit} ${i.name}, ${fmtMoney(f.cost || 0)}.`); } }).then(r => r.ok);
+    },
+  });
+}
+
+/* Create an ingredient: POST /ingredients */
+function openIngredientModal() {
+  if (!guard('ingredient.write')) return;
+  openModal({
+    title: 'New ingredient', subtitle: 'POST /ingredients → INSERT INTO ingredient (name, unit, reorder) VALUES (?, ?, ?)', submitLabel: 'Add Ingredient',
+    body: `<div class="grid sm:grid-cols-2 gap-3">
+      ${field('Name *', `<input name="name" class="input" maxlength="80" placeholder="e.g. Spelt Flour">`, 'sm:col-span-2')}
+      ${field('Unit *', `<input name="unit" class="input" maxlength="5" list="unitList" placeholder="g"><datalist id="unitList"><option>g</option><option>ml</option><option>kg</option><option>pcs</option></datalist>`)}
+      ${field('Reorder at *', `<input name="reorder" type="number" min="0" step="any" class="input" placeholder="e.g. 2000">`)}
+    </div>
+    <p class="text-xs text-ink/55 mt-3">It starts with 0 in stock. Record a delivery to add some.</p>`,
+    onSubmit(form, errEl) {
+      const f = Object.fromEntries(new FormData(form));
+      return run(() => createIngredient(f), { errEl, ok: () => toast('success', 'Ingredient added', f.name.trim()) }).then(r => r.ok);
+    },
+  });
+}
+
+function openReorderModal(id) {
+  if (!guard('reorder.update')) return;
+  const i = db.ingredient.find(x => x.id === id);
+  openModal({
+    title: `Edit reorder threshold`, subtitle: 'PUT /ingredients/:id → UPDATE ingredient SET name = ?, unit = ?, reorder = ? WHERE id = ?', submitLabel: 'Save',
+    body: `<p class="text-sm mb-3"><b>${esc(i.name)}</b> · current stock <span class="">${fmtQ(stockOf(i.id).stock)} ${i.unit}</span></p>
+      ${field(`Reorder threshold (${esc(i.unit)}) *`, `<input name="reorder" type="number" min="0" step="any" class="input " value="${i.reorder ?? ''}">`)}
+      <p class="text-xs text-stone-500 mt-2">Must be numeric and ≥ 0. A "Low Stock" alert shows when stock ≤ threshold.</p>`,
+    onSubmit(form, errEl) {
+      const v = new FormData(form).get('reorder');
+      return run(() => updateReorder(id, v), { errEl, ok: () => toast('success', 'Threshold updated', `${i.name} reorder level is now ${fmtQ(v)} ${i.unit}.`) }).then(r => r.ok);
+    },
+  });
+}
+
+function openUserModal(id) {
+  if (!guard('user.manage')) return;
+  const u = id ? db.user.find(x => x.id === id) : null;
+  openModal({
+    title: u ? `Edit baker · ${esc(u.username)}` : 'Add a baker', submitLabel: u ? 'Save Changes' : 'Create Account',
+    subtitle: u ? 'PATCH /users/:id/role → UPDATE user SET role = ? WHERE id = ?' : 'POST /auth/register, then PATCH /users/:id/role',
+    body: `<div class="grid gap-3">
+      ${field('Username *', `<input name="username" class="input" maxlength="50" value="${esc(u?.username ?? '')}" ${u ? 'readonly' : ''}>`)}
+      ${field('Role *', `<select name="role" class="input">${['user', 'admin', 'developer'].map(r => `<option ${u?.role === r ? 'selected' : ''}>${r}</option>`).join('')}</select>`)}
+      ${u ? '' : field('Password * (min 8)', `<input name="password" type="password" class="input" autocomplete="new-password">`)}</div>`,
+    onSubmit(form, errEl) {
+      const f = Object.fromEntries(new FormData(form));
+      if (u) f.username = u.username;
+      return run(() => u ? updateUser(u.id, f.role) : createUser(f.username, f.password, f.role),
+        { errEl, ok: () => toast('success', u ? 'Baker updated' : 'Baker added', `${f.username} · ${f.role}`) }).then(r => r.ok);
+    },
+  });
+}
+
+/* =====================================================================
+   LOGIN / REGISTER  (POST /auth/login, POST /auth/register)
+   ===================================================================== */
+let authMode = 'login';
+function setAuthMode(m) {
+  authMode = m;
+  $('#authTitle').textContent = m === 'login' ? 'Sign in' : 'Create a baker account';
+  $('#authSub').textContent = m === 'login' ? 'POST /auth/login — SELECT … FROM user WHERE username = ?, then bcrypt.compare' : 'POST /auth/register — bcrypt.hash, then INSERT INTO user (username, password_hash)';
+  $('#authSubmit span').textContent = m === 'login' ? 'Sign in' : 'Register';
+  $('#authSwitchText').textContent = m === 'login' ? 'No account?' : 'Have an account?';
+  $('#authSwitch').textContent = m === 'login' ? 'Register as baker' : 'Sign in';
+  $('#loginError').classList.add('hidden');
+}
+function initLogin() {
+  $('#authSwitch').addEventListener('click', () => setAuthMode(authMode === 'login' ? 'register' : 'login'));
+  $('#demoAccounts')?.addEventListener('click', e => {   // the box is removed on the public site
+    const b = e.target.closest('[data-fill]'); if (!b) return;
+    const [u, p] = b.dataset.fill.split('|'); $('#loginUser').value = u; $('#loginPass').value = p; setAuthMode('login');
+  });
+  $('#loginForm').addEventListener('submit', async e => {
+    e.preventDefault();
+    const err = $('#loginError'); err.classList.add('hidden');
+    const u = $('#loginUser').value, p = $('#loginPass').value;
+    const btn = $('#authSubmit'); btn.disabled = true;
+    try {
+      if (authMode === 'register') await registerUser(u, p);
+      const user = await login(u, p);
+      $('#loginPass').value = '';
+      setAuthMode('login');
+      await refresh();
+      toast('success', `Welcome, ${user.username}`, `Signed in as ${user.role}.`);
+    } catch (ex) {
+      err.textContent = ex.message || 'Sign-in failed. Please try again.';
+      err.classList.remove('hidden');
+    } finally {
+      btn.disabled = false;
+    }
+  });
+}
+
+/* =====================================================================
+   EVENTS + INIT
+   ===================================================================== */
+const goTab = tab => { setSidebar(false); activeTab = tab; renderAll(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+const actions = {
+  tab: d => goTab(d.tab),
+  nav: d => goTab(d.tab),
+  'sidebar-toggle': () => setSidebar(!sidebarOpen),
+  'sidebar-close': () => setSidebar(false),
+  'new-starter': () => openStarterModal(),
+  'starter-detail': d => openStarterDetail(+d.id),
+  'edit-starter': d => openStarterEditModal(+d.id),
+  feed: d => openFeedModal(+d.id || null),
+  bake: d => openBatchModal(+d.id || null),
+  'delete-starter': d => {
+    if (!guard('starter.write')) return;
+    const s = db.starter.find(x => x.id === +d.id);
+    confirmModal({ title: 'Remove starter?', confirmLabel: 'Remove Starter',
+      message: `Remove <b>${esc(s.name)}</b> from the shelf? A starter that still has feedings written down can't be removed.<span class="schema-only font-mono text-[11px] block mt-2">DELETE /starters/${s.id} · fk1 feeding → starter is ON DELETE RESTRICT → 409</span>`,
+      onConfirm: () => run(() => deleteStarter(s.id), { ok: () => toast('success', 'Starter removed', s.name) }) });
+  },
+  'new-batch': () => openBatchModal(),
+  'batch-filter': d => { batchFilter = d.f; renderAll(); },
+  advance: d => run(() => advanceBatch(+d.id), { ok: s => toast('success', `Bake No. ${d.id} → ${STAGES[s]}`, s === 3 ? 'Out of the oven.' : 'Time written down.') }),
+  'delete-batch': d => {
+    if (!guard('batch.write')) return;
+    const b = db.batch.find(x => x.id === +d.id), n = db.stock_movement.filter(m => m.batch_id === b.id).length;
+    confirmModal({ title: `Delete bake No. ${b.id}?`, confirmLabel: 'Delete Bake',
+      message: n ? `This bake has <b>${n}</b> ingredient record(s) in the stock ledger, so the database will refuse to delete it.` : 'This bake has no ingredient records and can be deleted.',
+      onConfirm: () => run(() => deleteBatch(b.id), { ok: () => toast('success', `Bake No. ${b.id} deleted`) }) });
+  },
+  restock: d => openRestockModal(+d.id || null),
+  waste: d => openWasteModal(+d.id || null),
+  'edit-reorder': d => openReorderModal(+d.id),
+  'new-ingredient': () => openIngredientModal(),
+  'ledger-filter': d => { ledgerFilter = d.f; renderAll(); },
+  'new-user': () => openUserModal(null),
+  'edit-user': d => openUserModal(+d.id),
+  'delete-user': d => {
+    if (!guard('user.manage')) return;
+    const u = db.user.find(x => x.id === +d.id);
+    confirmModal({ title: 'Remove baker?', confirmLabel: 'Remove', message: `Remove account <b>${esc(u.username)}</b> (${u.role})?`,
+      onConfirm: () => run(() => deleteUser(u.id), { ok: () => toast('success', 'Baker removed', u.username) }) });
+  },
+  logout: async () => {
+    try { await api('POST', '/auth/logout'); } catch (e) {}
+    session = null; renderAll();
+  },
+};
+
+document.addEventListener('click', e => {
+  const el = e.target.closest('[data-action]');
+  if (el && actions[el.dataset.action]) actions[el.dataset.action](el.dataset, el);
+});
+document.addEventListener('change', e => {
+  if (e.target.id === 'schemaToggle') {
+    showSchema = e.target.checked;
+    renderAll();
+  }
+});
+document.addEventListener('input', e => {
+  const c = e.target.dataset?.calc; if (!c) return;
+  if (c === 'loaves') calc.loaves = e.target.value;
+  if (c === 'per') calc.per[e.target.dataset.id] = +e.target.value || 0;
+  renderCalcResult();
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && sidebarOpen) setSidebar(false); });
+
+/* Start: ask the server who is signed in (GET /auth/me), then load the tables. */
+(async function init() {
+  // demo passwords only show on your own machine, never on the public site
+  if (!['localhost', '127.0.0.1'].includes(location.hostname)) $('#demoBox')?.remove();
+  initLogin();
+  try { session = await api('GET', '/auth/me'); } catch (e) { session = null; }
+  if (session) await refresh(); else renderAll();
+})();
