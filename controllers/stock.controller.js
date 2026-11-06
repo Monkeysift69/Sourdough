@@ -9,29 +9,28 @@ function fail(res, err) {
 // GET /stock-movements            -> all movements
 // GET /stock-movements?ingredient_id=3  -> one ingredient only
 exports.list = async (req, res) => {
-  let sql =
-    `SELECT sm.id, sm.movement_date, sm.movement_type, sm.qty,
-            i.id AS ingredient_id, i.name AS ingredient, i.unit,
-            sm.batch_id, rm.cost, cm.reason, u.username AS recorded_by
-       FROM stock_movement sm
-       JOIN ingredient i ON sm.ingredient_id = i.id
-       JOIN user u ON sm.user_id = u.id
-       LEFT JOIN restock_movement rm ON rm.id = sm.id
-       LEFT JOIN consumption_movement cm ON cm.id = sm.id`;
-  const params = [];
-
+  let ingredientId = null;   // null = no filter
   if (req.query.ingredient_id !== undefined) {
-    const ingredientId = Number(req.query.ingredient_id);
+    ingredientId = Number(req.query.ingredient_id);
     if (!Number.isInteger(ingredientId) || ingredientId <= 0) {
       return res.status(400).json({ error: 'Invalid ingredient id' });
     }
-    sql += ' WHERE sm.ingredient_id = ?';
-    params.push(ingredientId);
   }
-  sql += ' ORDER BY sm.movement_date DESC, sm.id DESC';
 
   try {
-    const [rows] = await pool.execute(sql, params);
+    // One fixed query: when ingredientId is NULL the first test is true, so every row is returned
+    const [rows] = await pool.execute(
+      `SELECT sm.id, sm.movement_date, sm.movement_type, sm.qty,
+              i.id AS ingredient_id, i.name AS ingredient, i.unit,
+              sm.batch_id, rm.cost, cm.reason
+         FROM stock_movement sm
+         JOIN ingredient i ON sm.ingredient_id = i.id
+         LEFT JOIN restock_movement rm ON rm.id = sm.id
+         LEFT JOIN consumption_movement cm ON cm.id = sm.id
+        WHERE (? IS NULL OR sm.ingredient_id = ?)
+        ORDER BY sm.movement_date DESC, sm.id DESC`,
+      [ingredientId, ingredientId]
+    );
     res.json(rows);
   } catch (err) {
     fail(res, err);
@@ -53,7 +52,7 @@ exports.restock = async (req, res) => {
   }
 
   try {
-    await pool.execute('CALL sp_record_restock(?, ?, ?, ?)', [ingredient_id, qty, cost, req.session.user.id]);
+    await pool.execute('CALL sp_record_restock(?, ?, ?)', [ingredient_id, qty, cost]);
     res.status(201).json({ ingredient_id, qty, cost });
   } catch (err) {
     if (err.code === 'ER_NO_REFERENCED_ROW_2') {
@@ -87,8 +86,8 @@ exports.waste = async (req, res) => {
     conn = await pool.getConnection();
     await conn.beginTransaction();
     const [r] = await conn.execute(
-      "INSERT INTO stock_movement (ingredient_id, movement_date, qty, movement_type, batch_id, user_id) VALUES (?, NOW(), ?, 'consumption', NULL, ?)",
-      [ingredient_id, qty, req.session.user.id]
+      "INSERT INTO stock_movement (ingredient_id, movement_date, qty, movement_type, batch_id) VALUES (?, NOW(), ?, 'consumption', NULL)",
+      [ingredient_id, qty]
     );   // trg_stock_no_negative checks the stock here
     await conn.execute(
       'INSERT INTO consumption_movement (id, reason) VALUES (?, ?)',

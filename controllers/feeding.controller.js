@@ -22,10 +22,7 @@ exports.getOne = async (req, res) => {
 
     try {
         const [rows] = await pool.execute(
-            `SELECT f.*, u.username AS logged_by
-               FROM feeding f
-               JOIN user u ON f.user_id = u.id
-              WHERE f.starter_id = ? AND f.feed_time = ?`,
+            'SELECT * FROM feeding WHERE starter_id = ? AND feed_time = ?',
             [starterId, feedTime]
         );
         if (rows.length === 0) return res.status(404).json({ error: 'Feeding not found' });

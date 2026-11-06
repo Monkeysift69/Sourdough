@@ -56,10 +56,6 @@ exports.remove = async (req, res) => {
     if (r.affectedRows === 0) return res.status(404).json({ error: 'User not found' });
     res.status(204).end();
   } catch (err) {
-    // feeding, batch and stock_movement point at user(id) with ON DELETE RESTRICT
-    if (err.code === 'ER_ROW_IS_REFERENCED_2') {
-      return res.status(409).json({ error: 'This user has recorded data and cannot be deleted' });
-    }
     fail(res, err);
   }
 }

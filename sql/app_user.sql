@@ -5,4 +5,4 @@
 CREATE USER IF NOT EXISTS 'sourdough_app'@'localhost' IDENTIFIED BY 'CHANGE_ME_to_a_long_password';
 GRANT SELECT, INSERT, UPDATE, DELETE, EXECUTE ON sourdough.* TO 'sourdough_app'@'localhost';
 SHOW GRANTS FOR 'sourdough_app'@'localhost';
--- seed.sql uses TRUNCATE, so keep running `npm run seed` with the root login (or reseed from Workbench).
+-- seed.sql uses TRUNCATE, so run it in Workbench with the root login.

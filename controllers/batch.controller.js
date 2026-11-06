@@ -9,10 +9,9 @@ function fail(res, err) {
 exports.getAll = async (req, res) => {
     try {
         const [rows] = await pool.execute(
-            `SELECT b.*, s.name AS starter_name, u.username AS baked_by
+            `SELECT b.*, s.name AS starter_name
                FROM batch b
                JOIN starter s ON b.starter_id = s.id
-               JOIN user u ON b.user_id = u.id
               ORDER BY b.id DESC`
         );
         res.json(rows);
@@ -30,10 +29,9 @@ exports.getOne = async (req, res) => {
 
     try {
         const [rows] = await pool.execute(
-            `SELECT b.*, s.name AS starter_name, u.username AS baked_by
+            `SELECT b.*, s.name AS starter_name
                FROM batch b
                JOIN starter s ON b.starter_id = s.id
-               JOIN user u ON b.user_id = u.id
               WHERE b.id = ?`,
             [id]
         );
@@ -92,10 +90,9 @@ exports.create = async (req, res) => {
     try {
         conn = await pool.getConnection();
         await conn.query(
-            'CALL sp_add_batch_with_consumption(?, ?, ?, ?, ?, ?, @bid)',
+            'CALL sp_add_batch_with_consumption(?, ?, ?, ?, ?, @bid)',
             [starter_id, feeding_time, qty_removed_g, loaf_count,
-             JSON.stringify(items.map(it => ({ ingredient_id: it.ingredient_id, qty: it.qty }))),
-             req.session.user.id]
+             JSON.stringify(items.map(it => ({ ingredient_id: it.ingredient_id, qty: it.qty })))]
         );
         const [rows] = await conn.query('SELECT @bid AS id');
         const batchId = rows[0].id;
@@ -124,37 +121,42 @@ exports.update = async (req, res) => {
         return res.status(400).json({ error: 'Invalid batch id' });
     }
 
-    // only these column names can ever go into the SQL text
     const timeCols = ['mix_time', 'bulk_ferment_start', 'bulk_ferment_end', 'cold_proof_start', 'cold_proof_end'];
-    const sets = [];
-    const values = [];
-
     for (const col of timeCols) {
-        if (req.body[col] !== undefined) {
-            if (req.body[col] !== null && isNaN(Date.parse(req.body[col]))) {
-                return res.status(400).json({ error: `${col} must be a date and time` });
-            }
-            sets.push(`${col} = ?`);
-            values.push(req.body[col]);
+        const v = req.body[col];
+        if (v !== undefined && v !== null && isNaN(Date.parse(v))) {
+            return res.status(400).json({ error: `${col} must be a date and time` });
         }
     }
-    if (req.body.loaf_count !== undefined) {
-        if (!Number.isInteger(req.body.loaf_count) || req.body.loaf_count <= 0) {
-            return res.status(400).json({ error: 'Loaf count must be a whole number above 0' });
-        }
-        sets.push('loaf_count = ?');
-        values.push(req.body.loaf_count);
+    const loaf = req.body.loaf_count;
+    if (loaf !== undefined && (!Number.isInteger(loaf) || loaf <= 0)) {
+        return res.status(400).json({ error: 'Loaf count must be a whole number above 0' });
     }
-
-    if (sets.length === 0) {
+    if (timeCols.every(col => req.body[col] == null) && loaf === undefined) {
         return res.status(400).json({ error: 'Nothing to update' });
     }
 
     try {
-        values.push(id);
+        // One fixed query: a field that isn't sent arrives as NULL,
+        // and COALESCE(NULL, column) keeps the value already stored.
         const [r] = await pool.execute(
-            `UPDATE batch SET ${sets.join(', ')} WHERE id = ?`,
-            values
+            `UPDATE batch
+                SET mix_time           = COALESCE(?, mix_time),
+                    bulk_ferment_start = COALESCE(?, bulk_ferment_start),
+                    bulk_ferment_end   = COALESCE(?, bulk_ferment_end),
+                    cold_proof_start   = COALESCE(?, cold_proof_start),
+                    cold_proof_end     = COALESCE(?, cold_proof_end),
+                    loaf_count         = COALESCE(?, loaf_count)
+              WHERE id = ?`,
+            [
+                req.body.mix_time ?? null,
+                req.body.bulk_ferment_start ?? null,
+                req.body.bulk_ferment_end ?? null,
+                req.body.cold_proof_start ?? null,
+                req.body.cold_proof_end ?? null,
+                loaf ?? null,
+                id
+            ]
         );
         if (r.affectedRows === 0) return res.status(404).json({ error: 'Batch not found' });
         res.json({ updated: r.affectedRows });
@@ -175,7 +177,7 @@ exports.remove = async (req, res) => {
         if (r.affectedRows === 0) return res.status(404).json({ error: 'Batch not found' });
         res.status(204).end();
     } catch (err) {
-        // consumption_movement rows still point at this batch
+        // stock_movement rows still point at this batch (fk_stock_batch)
         if (err.code === 'ER_ROW_IS_REFERENCED_2') {
             return res.status(409).json({ error: 'This batch has ingredient records and cannot be deleted' });
         }

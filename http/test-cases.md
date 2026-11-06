@@ -1,12 +1,6 @@
-# CSS326 Lab — Test Case Checklist (Sourdough Log)
+# Sourdough Log — Test Cases (CSS326)
 
-Run the matching request in `http/sqli-tests.http` (block IDs line up: TC03 → `### TC03…`).
-Tick each box when the **Expected result** is observed. Record Pass/Fail and the HTTP status.
-
-**Seeded accounts:** `dev` (developer), `admin` (admin), `baker` (user) — see `sql/seed.sql`.
-**Domain mapping:** books → `ingredient`, borrow/decrement → batch creation, audit/dev page → `/users`.
-
----
+Tick each case during the demo. Requests for every case are in `http/test.http`.
 
 ## Setup
 
@@ -25,7 +19,7 @@ Tick each box when the **Expected result** is observed. Record Pass/Fail and the
 
 - [ ] **TC02 — App connects via pool; controller join** · _role: —_
   - Steps: Inspect `.env`, `config/db.js`, `controllers/batch.controller.js`; then run `GET /batches`.
-  - Expected: app connects through the pool; `GET /batches` returns rows with `starter_name` and `baked_by` (join works).
+  - Expected: app connects through the pool; `GET /batches` returns rows with `starter_name` (join with starter works).
   - Result: ______  Notes: ______
 
 ---
@@ -104,19 +98,3 @@ Tick each box when the **Expected result** is observed. Record Pass/Fail and the
   - Steps: `POST /stock-movements/restock`.
   - Expected: **201**; `sp_record_restock` writes a `restock` row (visible via `GET /stock-movements?ingredient_id=1`).
   - Result: ______
-
----
-
-### Summary
-
-| TC | Pass/Fail | TC | Pass/Fail |
-|----|-----------|----|-----------|
-| TC01 |  | TC08 |  |
-| TC02 |  | TC09 |  |
-| TC03 |  | TC10 |  |
-| TC04 |  | TC11 |  |
-| TC05 |  | TC12 |  |
-| TC06 |  | TC13 |  |
-| TC07 |  | TC14 |  |
-
-Tester: ______________  Date: ____________
