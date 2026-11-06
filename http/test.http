@@ -51,11 +51,11 @@
 #  TC02 — App connects via pool; controller joins   [MANUAL / inspection]
 #  Expected: app uses a connection pool; a controller JOINs across tables.
 #  Check: .env (DB_HOST/USER/PASS/NAME), config/db.js (mysql2 createPool),
-#         controllers/batch.controller.js getAll — JOINs batch + starter + user.
+#         controllers/batch.controller.js getAll — JOINs batch + starter.
 #  The request below is the live proof that the join works (run TC03-login first):
 # ████████████████████████████████████████████████████████████████████████████
 
-### TC02 (live) login as admin, then read joined batch list -> rows include starter_name & baked_by
+### TC02 (live) login as admin, then read joined batch list -> rows include starter_name
 # @name loginAdmin
 POST {{real}}/auth/login
 Content-Type: application/json
@@ -346,11 +346,11 @@ Content-Type: application/json
 
 { "username": "{{adminUser}}", "password": "{{adminPass}}" }
 
-### TC14b call sp_record_restock via the endpoint -> 201 { ingredient_id, qty, reason }
+### TC14b call sp_record_restock via the endpoint -> 201 { ingredient_id, qty, cost }
 POST {{real}}/stock-movements/restock
 Content-Type: application/json
 
-{ "ingredient_id": 1, "qty": 5000, "reason": "TC14 stored-procedure test" }
+{ "ingredient_id": 1, "qty": 5000, "cost": 175 }
 
 ### TC14c confirm the SP wrote a 'restock' stock_movement row
 GET {{real}}/stock-movements?ingredient_id=1

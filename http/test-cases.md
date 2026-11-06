@@ -1,3 +1,7 @@
+# Sourdough Log — Test Cases (CSS326)
+
+Tick each case during the demo. Requests for every case are in `http/test.http`.
+
 ## Setup
 
 - [ ] App running on `http://localhost:3650` (`npm start`)
@@ -94,5 +98,3 @@
   - Steps: `POST /stock-movements/restock`.
   - Expected: **201**; `sp_record_restock` writes a `restock` row (visible via `GET /stock-movements?ingredient_id=1`).
   - Result: ______
-
---
