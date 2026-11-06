@@ -293,45 +293,67 @@ Content-Type: application/json
 #  TC13 — Trigger   Expected: inserting a 'consumption' stock_movement fires
 #  trg_stock_no_negative (BEFORE INSERT on stock_movement). Over-consuming is
 #  blocked with SQLSTATE 45000 -> the API returns 409. A valid batch decrements
-#  stock. Creating a batch is the user-facing action that inserts consumption.
-#  Login as admin (or any logged-in user) first.
+#  stock. Waste (TC13c-d) and batch create (TC13f-h) both insert consumption
+#  rows. Run on a fresh seed.sql so sesame starts at 250 g.
 # ████████████████████████████████████████████████████████████████████████████
 
-### TC13a login
+### TC13a login as admin (waste + restock need admin/developer)
 POST {{real}}/auth/login
 Content-Type: application/json
 
 { "username": "{{adminUser}}", "password": "{{adminPass}}" }
 
-### TC13b find a REAL feeding to attach the batch to (need a valid starter_id + feed_time)
+### TC13b stock BEFORE -> Toasted Sesame Seeds (id 6) = 250 after a fresh seed
+GET {{real}}/ingredients/stock
+
+### TC13c TRIGGER via waste: take 251 g when only 250 g left -> 409 "Not enough in stock..."
+#   One gram over is enough: the trigger compares NEW.qty with (restocks - consumptions).
+POST {{real}}/stock-movements/waste
+Content-Type: application/json
+
+{ "ingredient_id": 6, "qty": 251, "reason": "TC13 trigger test" }
+
+### TC13d boundary: same thing at exactly 1 g -> 201 (trigger lets it through)
+POST {{real}}/stock-movements/waste
+Content-Type: application/json
+
+{ "ingredient_id": 6, "qty": 1, "reason": "TC13 trigger test" }
+
+### TC13e get a real feeding for starter 1 (TC13f/h read feed_time from this response)
+# @name tc13Feedings
 GET {{real}}/starters/1/feedings
 
-### TC13c TRIGGER FIRES: consume an absurd qty -> 409 "Not enough stock..."
-#   Replace feeding_time with a feed_time from TC13b. The huge qty forces the
-#   trigger's SIGNAL. (If you get 404, the feeding_time didn't match a row.)
+### TC13f TRIGGER inside the procedure: flour is fine, sesame is too much -> 409 "Not enough stock..."
+#   sp_add_batch_with_consumption inserts the batch, then each item. The sesame
+#   row fires the SIGNAL, the EXIT HANDLER rolls back -> no batch, no flour row either.
 POST {{real}}/batches
 Content-Type: application/json
 
 {
   "starter_id": 1,
-  "feeding_time": "REPLACE_WITH_FEED_TIME_FROM_TC13b",
+  "feeding_time": "{{tc13Feedings.response.body.$[0].feed_time}}",
   "qty_removed_g": 50,
   "loaf_count": 1,
-  "items": [ { "ingredient_id": 1, "qty": 999999, "cost": 10 } ]
+  "items": [ { "ingredient_id": 1, "qty": 100 }, { "ingredient_id": 6, "qty": 1000 } ]
 }
 
-### TC13d VALID batch: a small qty within stock -> 201 { id }, stock decremented
-#   Verify afterward: GET /stock-movements?ingredient_id=1 shows a 'consumption' row.
+### TC13g proof of rollback: bake list unchanged (still 101 + 102), stock unchanged
+GET {{real}}/batches
+
+### TC13h VALID batch within stock -> 201 { id: 104 }  (103 was used up by the rolled-back TC13f: AUTO_INCREMENT is not rolled back)
 POST {{real}}/batches
 Content-Type: application/json
 
 {
   "starter_id": 1,
-  "feeding_time": "REPLACE_WITH_FEED_TIME_FROM_TC13b",
+  "feeding_time": "{{tc13Feedings.response.body.$[0].feed_time}}",
   "qty_removed_g": 50,
   "loaf_count": 1,
-  "items": [ { "ingredient_id": 1, "qty": 100, "cost": 10 } ]
+  "items": [ { "ingredient_id": 1, "qty": 100 }, { "ingredient_id": 6, "qty": 100 } ]
 }
+
+### TC13i stock AFTER -> sesame 250 - 1 - 100 = 149, flour down 100
+GET {{real}}/ingredients/stock
 
 
 # ████████████████████████████████████████████████████████████████████████████
