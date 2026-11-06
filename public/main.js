@@ -92,11 +92,11 @@ async function loadAll() {
     starter: starters.map(s => ({ ...s, hydration: Number(s.hydration), min_weight_g: Number(s.min_weight_g) })),
     feeding: feedLists.flat().map(f => ({
       starter_id: f.starter_id, feed_time: f.feed_time, temp: num(f.temp),
-      peak_time: f.peaktime, qty_added_g: Number(f.qty_added_g), logged_by: f.logged_by,
+      peak_time: f.peaktime, qty_added_g: Number(f.qty_added_g),
     })),
     batch: batches.map(b => ({ ...b, mix_time: b.mix_time || b.feeding_time, loaf_count: Number(b.loaf_count), qty_removed_g: Number(b.qty_removed_g) })),
     ingredient: ingredients.map(i => ({ ...i, reorder: num(i.reorder) })),
-    stock_movement: moves.map(m => ({ id: m.id, ingredient_id: m.ingredient_id, movement_date: m.movement_date, qty: Number(m.qty), movement_type: m.movement_type, batch_id: m.batch_id, recorded_by: m.recorded_by })),
+    stock_movement: moves.map(m => ({ id: m.id, ingredient_id: m.ingredient_id, movement_date: m.movement_date, qty: Number(m.qty), movement_type: m.movement_type, batch_id: m.batch_id })),
     restock_movement: moves.filter(m => m.movement_type === 'restock').map(m => ({ id: m.id, cost: num(m.cost) })),
     consumption_movement: moves.filter(m => m.movement_type === 'consumption').map(m => ({ id: m.id, reason: m.reason })),
     user: users,
@@ -444,7 +444,7 @@ function viewStarters() {
   const jars = db.starter.map(starterEntry).join('');
   const feeds = [...db.feeding].sort((a, b) => b.feed_time.localeCompare(a.feed_time));
   const rows = feeds.map(f => tr(
-    td(`${when(f.feed_time)}`) + td(`${esc(starterName(f.starter_id))} <span class="font-sans text-xs text-ink/50">by ${esc(f.logged_by)}</span>`, 'font-serif text-[15px]')
+    td(`${when(f.feed_time)}`) + td(esc(starterName(f.starter_id)), 'font-serif text-[15px]')
     + td(f.temp != null ? `${fmtQ(f.temp)}°C` : '—', 'text-right tnum') + td(when(f.peak_time), 'text-ink/65')
     + td(`+${fmtQ(f.qty_added_g)} g`, 'text-right tnum') + td(schema(`(${f.starter_id}, '${esc(f.feed_time.slice(0, 16))}')`), 'schema-only')
   )).join('');
@@ -507,7 +507,7 @@ function batchEntry(b) {
   return `<article class="py-7 border-t border-ink/15 grid sm:grid-cols-[120px_1fr_auto] gap-x-8 gap-y-3">
     <div><p class="h-serif text-3xl leading-none">No. ${b.id}</p><p class="text-xs text-ink/50 mt-2">mixed ${when(b.mix_time)}</p></div>
     <div class="min-w-0">
-      <p class="text-[15px]"><span class="font-medium">${b.loaf_count} loaves</span> from <span class="font-serif italic">${esc(starterName(b.starter_id))}</span>, using ${fmtQ(b.qty_removed_g)} g of starter. <span class="text-[13px] text-ink/50">Baked by ${esc(b.baked_by)}.</span></p>
+      <p class="text-[15px]"><span class="font-medium">${b.loaf_count} loaves</span> from <span class="font-serif italic">${esc(starterName(b.starter_id))}</span>, using ${fmtQ(b.qty_removed_g)} g of starter.</p>
       <ol class="flex flex-wrap gap-x-3 gap-y-3 mt-4">${steps}</ol>
       <p class="text-[13px] text-ink/60 mt-4">${used.length ? `Took ${listOf(used)}.` : 'No ingredients recorded.'}</p>
       ${schema(`<span class="block mt-1">batch.id ${b.id} · FK feeding (${b.starter_id}, '${esc(b.feeding_time.slice(0, 16))}') · stock_movement.batch_id = ${b.id}: ${items.map(x => '#' + x.m.id).join(', ') || '—'}</span>`)}
@@ -577,12 +577,11 @@ function ledgerSection() {
       + td(esc(ing?.name ?? '#' + m.ingredient_id))
       + td(`<span class="font-mono ${isR ? '' : 'text-accent'}">${isR ? '+' : '−'}${fmtQ(m.qty)}</span> <span class="text-ink/50">${esc(ing?.unit ?? '')}</span>`, 'text-right')
       + td(isR ? '<span class="text-ink/70">Delivery</span>' : m.batch_id ? `<span class="text-ink/70">Used in bake No. ${m.batch_id}</span>` : `<span class="text-accent">${esc(sub?.reason ?? '—')}</span>`)
-      + td(esc(m.recorded_by), 'text-ink/70')
       + td(isR && sub?.cost != null ? `<span class="font-mono text-xs">${fmtMoney(sub.cost)}</span>` : '', 'text-right !pr-0')
       + td(schema(`${isR ? 'restock_movement' : 'consumption_movement'}.id = ${m.id}`), 'schema-only'));
   }).join('');
   return section('Stock ledger', filterLinks('ledger-filter', ledgerFilter, [['all', 'All'], ['restock', 'In'], ['consumption', 'Out']]),
-    `<div class="max-h-[520px] overflow-y-auto scroll-thin">${table(th('No.') + th('When') + th('Ingredient') + th('Qty', 'text-right') + th('Note') + th('By') + th('Cost paid', 'text-right') + th('Subtype row', 'schema-only'), body, 'No movements.', 8)}</div>`);
+    `<div class="max-h-[520px] overflow-y-auto scroll-thin">${table(th('No.') + th('When') + th('Ingredient') + th('Qty', 'text-right') + th('Note') + th('Cost paid', 'text-right') + th('Subtype row', 'schema-only'), body, 'No movements.', 7)}</div>`);
 }
 
 /* ---------- Bakers (admin) ---------- */
@@ -622,7 +621,7 @@ async function openStarterDetail(id) {
         ${row('About in the jar now', fmtQ(res) + ' g')}${row('Feedings written down', feeds.length)}
       </dl>
       <p class="label mt-5">Feeding history</p>
-      <ul class="text-[13px] mt-1">${feeds.map(f => `<li class="flex justify-between py-1 border-b border-ink/10"><span>${when(f.feed_time)} <span class="text-ink/50">by ${esc(f.logged_by)}</span></span><span class="tnum">${f.temp != null ? fmtQ(f.temp) + '°C · ' : ''}+${fmtQ(f.qty_added_g)} g</span></li>`).join('') || '<li class="py-1 text-ink/45 font-serif italic">None yet.</li>'}</ul>
+      <ul class="text-[13px] mt-1">${feeds.map(f => `<li class="flex justify-between py-1 border-b border-ink/10"><span>${when(f.feed_time)}</span><span class="tnum">${f.temp != null ? fmtQ(f.temp) + '°C · ' : ''}+${fmtQ(f.qty_added_g)} g</span></li>`).join('') || '<li class="py-1 text-ink/45 font-serif italic">None yet.</li>'}</ul>
       <div class="flex justify-end items-center gap-5 mt-6"><button type="button" class="btn-ghost" data-close>Close</button><button type="button" class="btn-primary" data-b="edit">Edit</button></div>`,
     onMount(root, close) { $('[data-b=edit]', root).addEventListener('click', () => { close(); openStarterEditModal(s.id); }); },
   });
@@ -671,7 +670,7 @@ function openFeedModal(preId) {
   if (!db.starter.length) return toast('warn', 'No starters', 'Create a starter first.');
   const now = Date.now();
   openModal({
-    title: 'Feed Starter', subtitle: 'POST /starters/:id/feedings → INSERT INTO feeding (starter_id, feed_time, temp, peaktime, qty_added_g, user_id) VALUES (?, ?, ?, ?, ?, ?)', submitLabel: 'Log Feeding',
+    title: 'Feed Starter', subtitle: 'POST /starters/:id/feedings → INSERT INTO feeding (starter_id, feed_time, temp, peaktime, qty_added_g) VALUES (?, ?, ?, ?, ?)', submitLabel: 'Log Feeding',
     body: `<div class="grid sm:grid-cols-2 gap-3">
       ${field('Starter (FK → starter.id) *', `<select name="starter_id" class="input">${db.starter.map(s => `<option value="${s.id}" ${s.id === preId ? 'selected' : ''}>#${s.id} · ${esc(s.name)}</option>`).join('')}</select>`, 'sm:col-span-2')}
       ${field('Feed time (part of PK) *', `<input name="feed_time" type="datetime-local" class="input" value="${toInput(toSql(now))}">`)}
@@ -811,7 +810,7 @@ function openRestockModal(preId) {
   if (!guard('restock')) return;
   const opt = i => `<option value="${i.id}" ${i.id === preId ? 'selected' : ''}>${esc(i.name)} — ${fmtQ(stockOf(i.id).stock)} ${i.unit} on hand</option>`;
   openModal({
-    title: 'Record a delivery', subtitle: 'POST /stock-movements/restock → CALL sp_record_restock(ingredient_id, qty, cost, user_id)', submitLabel: 'Record Delivery', submitClass: 'btn-green',
+    title: 'Record a delivery', subtitle: 'POST /stock-movements/restock → CALL sp_record_restock(ingredient_id, qty, cost)', submitLabel: 'Record Delivery', submitClass: 'btn-green',
     body: `<div class="grid gap-3">
       ${field('Ingredient (FK) *', `<select name="ingredient_id" class="input">${db.ingredient.map(opt).join('')}</select>`)}
       ${field('Quantity received *', `<div class="relative"><input name="qty" type="number" min="0" step="any" class="input pr-12 " placeholder="e.g. 10000"><span id="rUnit" class="absolute right-3 top-2 text-sm text-stone-400"></span></div>`)}

@@ -32,8 +32,3 @@ sql/app_user.sql       least-privilege MySQL user for the app (Lab 10)
 | starters, feedings, bakes | ✓ | ✓ | ✓ |
 | restock, ingredients | | ✓ | ✓ |
 | manage users | | | ✓ |
-
-## Who did what
-Feeding, batch and stock_movement each have a `user_id` that points at `user(id)` (ON DELETE RESTRICT), so every record shows who made it.
-The API fills `user_id` from the login session, never from the request body, and returns the name as `logged_by` (feedings), `baked_by` (batches) and `recorded_by` (stock movements).
-A user who has recorded data cannot be deleted (409).

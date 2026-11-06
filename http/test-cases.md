@@ -15,7 +15,7 @@
 
 - [ ] **TC02 — App connects via pool; controller join** · _role: —_
   - Steps: Inspect `.env`, `config/db.js`, `controllers/batch.controller.js`; then run `GET /batches`.
-  - Expected: app connects through the pool; `GET /batches` returns rows with `starter_name` and `baked_by` (join works).
+  - Expected: app connects through the pool; `GET /batches` returns rows with `starter_name` (join with starter works).
   - Result: ______  Notes: ______
 
 ---

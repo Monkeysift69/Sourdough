@@ -1,0 +1,356 @@
+# ============================================================================
+#  CSS326 Lab — Test Cases TC01–TC14   (Sourdough Log)
+# ----------------------------------------------------------------------------
+#  Open in VS Code "REST Client" (humao.rest-client) or JetBrains HTTP client.
+#  Click "Send Request" above each ### block.
+#
+#  The rubric is written in library terms (books/loans/members). This file maps
+#  each criterion onto THIS app:
+#     books/catalog item   -> ingredient   (admin-gated CRUD)
+#     borrow / decrement    -> batch creation consumes stock (fires a TRIGGER)
+#     stored procedure      -> sp_record_restock / sp_add_batch_with_consumption
+#     audit / developer page-> /users  (developer-only)
+#
+#  COOKIES: the client keeps ONE cookie jar per host. "Logging in" as a role
+#  REPLACES the current session, so for the access-control cases just send the
+#  right login request immediately before the test. Re-send a login whenever
+#  you want to switch role.
+#
+#  Some criteria (TC01, TC02, TC11) are inspection steps, not HTTP requests.
+#  They're written as checklists so this file is a complete test record.
+# ============================================================================
+
+@real = http://localhost:3650
+
+# Seeded accounts (sql/seed.sql). Fill in the passwords you seeded with.
+@devUser   = dev
+@devPass   = dev123
+@adminUser = admin
+@adminPass = admin123
+@userUser  = baker
+@userPass  = baker123
+
+
+# ████████████████████████████████████████████████████████████████████████████
+#  TC01 — ERD & schema            [MANUAL / inspection, no request]
+#  Expected: 5+ entities, 3+ relationships; a weak-entity FK is in place.
+#  Check in MySQL Workbench:
+#    Entities: user, starter, feeding, batch, ingredient, stock_movement,
+#              consumption_movement, restock_movement  (8)
+#    feeding.starter_id      FK -> starter.id   (weak entity: PK = starter_id+feed_time)
+#    batch.starter_id        FK -> starter.id
+#    batch (starter_id,feeding_time) FK -> feeding
+#    stock_movement.ingredient_id FK -> ingredient.id
+#  SQL to confirm the FK:
+#    SELECT * FROM information_schema.KEY_COLUMN_USAGE
+#     WHERE TABLE_NAME='feeding' AND REFERENCED_TABLE_NAME IS NOT NULL;
+# ████████████████████████████████████████████████████████████████████████████
+
+
+# ████████████████████████████████████████████████████████████████████████████
+#  TC02 — App connects via pool; controller joins   [MANUAL / inspection]
+#  Expected: app uses a connection pool; a controller JOINs across tables.
+#  Check: .env (DB_HOST/USER/PASS/NAME), config/db.js (mysql2 createPool),
+#         controllers/batch.controller.js getAll — JOINs batch + starter + user.
+#  The request below is the live proof that the join works (run TC03-login first):
+# ████████████████████████████████████████████████████████████████████████████
+
+### TC02 (live) login as admin, then read joined batch list -> rows include starter_name & baked_by
+# @name loginAdmin
+POST {{real}}/auth/login
+Content-Type: application/json
+
+{ "username": "{{adminUser}}", "password": "{{adminPass}}" }
+
+###
+GET {{real}}/batches
+
+
+# ████████████████████████████████████████████████████████████████████████████
+#  TC03 — CRUD Create (Admin)   Expected: 201; row appears in list
+#  (run the admin login just above first)
+# ████████████████████████████████████████████████████████████████████████████
+
+### TC03 create an ingredient -> 201 { id, name, unit, reorder }
+# @name createIngredient
+POST {{real}}/ingredients
+Content-Type: application/json
+
+{ "name": "Test Rye Flour", "unit": "g", "reorder": 1000 }
+
+### TC03 verify it is in the list -> find "Test Rye Flour"
+GET {{real}}/ingredients
+
+
+# ████████████████████████████████████████████████████████████████████████████
+#  TC04 — CRUD Read (User)   Expected: list + detail load with correct data
+# ████████████████████████████████████████████████████████████████████████████
+
+### TC04a login as USER (baker)
+POST {{real}}/auth/login
+Content-Type: application/json
+
+{ "username": "{{userUser}}", "password": "{{userPass}}" }
+
+### TC04b read list -> 200 array
+GET {{real}}/ingredients
+
+### TC04c read one -> 200 single object (use an id you saw in TC03/TC04b)
+GET {{real}}/ingredients/1
+
+
+# ████████████████████████████████████████████████████████████████████████████
+#  TC05 — CRUD Update (Admin)   Expected: reorder changes (3 -> 5 style)
+#  Re-login as admin first (user session is active from TC04).
+# ████████████████████████████████████████████████████████████████████████████
+
+### TC05a login as admin
+POST {{real}}/auth/login
+Content-Type: application/json
+
+{ "username": "{{adminUser}}", "password": "{{adminPass}}" }
+
+### TC05b update ingredient 1 -> 200 { updated: 1 }  (change name/unit/reorder)
+PUT {{real}}/ingredients/1
+Content-Type: application/json
+
+{ "name": "Unbleached Bread Flour", "unit": "g", "reorder": 5000 }
+
+### TC05c read back to confirm the new value
+GET {{real}}/ingredients/1
+
+
+# ████████████████████████████████████████████████████████████████████████████
+#  TC06 — CRUD Delete (Admin)   Expected: gone from UI and table
+#  Delete the throwaway ingredient created in TC03 (put its id in the URL).
+# ████████████████████████████████████████████████████████████████████████████
+
+### TC06a delete -> 204 No Content  (change the id to the TC03 one)
+DELETE {{real}}/ingredients/REPLACE_WITH_TC03_ID
+
+### TC06b confirm it is gone -> 404
+GET {{real}}/ingredients/REPLACE_WITH_TC03_ID
+
+
+# ████████████████████████████████████████████████████████████████████████████
+#  TC07 — CRUD Validation (Admin)   Expected: clear message, NO row inserted
+# ████████████████████████████████████████████████████████████████████████████
+
+### TC07 save with empty name -> 400 { error: "Name is required..." }
+POST {{real}}/ingredients
+Content-Type: application/json
+
+{ "name": "", "unit": "g", "reorder": 100 }
+
+
+# ████████████████████████████████████████████████████████████████████████████
+#  TC08 — Access control (User)   Expected: server returns 403 on write
+#  A normal user must not be able to create/update/delete ingredients.
+# ████████████████████████████████████████████████████████████████████████████
+
+### TC08a login as USER (baker)
+POST {{real}}/auth/login
+Content-Type: application/json
+
+{ "username": "{{userUser}}", "password": "{{userPass}}" }
+
+### TC08b user tries to UPDATE -> 403 "Your role is not allowed to do this"
+PUT {{real}}/ingredients/1
+Content-Type: application/json
+
+{ "name": "Hacked", "unit": "g", "reorder": 0 }
+
+### TC08c user tries to CREATE -> 403
+POST {{real}}/ingredients
+Content-Type: application/json
+
+{ "name": "Sneaky", "unit": "g", "reorder": 1 }
+
+### TC08d user tries to DELETE -> 403
+DELETE {{real}}/ingredients/1
+
+
+# ████████████████████████████████████████████████████████████████████████████
+#  TC09 — Access control (Developer)   Expected: developer-only page allowed;
+#  Admin and User refused. The developer-only area here is /users.
+# ████████████████████████████████████████████████████████████████████████████
+
+### TC09a login as DEVELOPER (dev) -> then /users is allowed
+POST {{real}}/auth/login
+Content-Type: application/json
+
+{ "username": "{{devUser}}", "password": "{{devPass}}" }
+
+### TC09b developer reads /users -> 200 array of users
+GET {{real}}/users
+
+### TC09c now login as ADMIN
+POST {{real}}/auth/login
+Content-Type: application/json
+
+{ "username": "{{adminUser}}", "password": "{{adminPass}}" }
+
+### TC09d admin reads /users -> 403 (developer-only)
+GET {{real}}/users
+
+### TC09e login as USER, then /users -> 403
+POST {{real}}/auth/login
+Content-Type: application/json
+
+{ "username": "{{userUser}}", "password": "{{userPass}}" }
+
+### TC09f user reads /users -> 403
+GET {{real}}/users
+
+
+# ████████████████████████████████████████████████████████████████████████████
+#  TC10 — Security: SQL injection on login
+#  Expected: login FAILS; no error detail shown. (401, generic message.)
+# ████████████████████████████████████████████████████████████████████████████
+
+### TC10a classic ' OR '1'='1 in username -> 401
+POST {{real}}/auth/login
+Content-Type: application/json
+
+{ "username": "' OR '1'='1", "password": "x" }
+
+### TC10b comment-out bypass -> 401
+POST {{real}}/auth/login
+Content-Type: application/json
+
+{ "username": "admin' -- ", "password": "x" }
+
+### TC10c always-true + comment -> 401
+POST {{real}}/auth/login
+Content-Type: application/json
+
+{ "username": "' OR '1'='1' -- ", "password": "x" }
+
+### TC10d inject the password field -> 401
+POST {{real}}/auth/login
+Content-Type: application/json
+
+{ "username": "admin", "password": "' OR '1'='1" }
+
+### TC10e stacked query (table must NOT drop) -> 401
+POST {{real}}/auth/login
+Content-Type: application/json
+
+{ "username": "'; DROP TABLE user; -- ", "password": "x" }
+
+#  --- extended injection probes on authed inputs (login as any role first) ---
+
+### TC10f :id path param injection -> 400 (validated as integer)
+GET {{real}}/starters/%27%20OR%20%271%27=%271
+
+### TC10g query-string filter injection -> 200 empty/filtered, no DB error
+GET {{real}}/stock-movements?ingredient_id=%27%20OR%20%271%27=%271
+
+### TC10h BLIND time-based on feeding :feedTime -> INSTANT 400, NOT a 5s wait
+#   A ~5s response would mean SLEEP ran (injectable). Fast = safe.
+GET {{real}}/feedings/1/2026-01-01%27%20AND%20SLEEP(5)--%20
+
+
+# ████████████████████████████████████████████████████████████████████████████
+#  TC11 — Security: queries use ? placeholders; no creds in code  [MANUAL]
+#  Expected: parameterised queries only; credentials live in .env, not source.
+#  Check: grep the controllers — every pool.execute uses ? + an array.
+#     grep -rn "pool.execute" controllers/      # all use ?, none build SQL by +
+#     config/db.js reads process.env.DB_*       # no literal password
+#     .env is in .gitignore                      # secrets not committed
+#  The only interpolation (batch.controller UPDATE) injects WHITELISTED column
+#  names, never user input — values still go through ?.
+# ████████████████████████████████████████████████████████████████████████████
+
+
+# ████████████████████████████████████████████████████████████████████████████
+#  TC12 — Security: error handling   Expected: generic message to user,
+#  detail only in the server log. Trigger a duplicate-key error.
+#  (ingredient.name has UNIQUE uq_ingredient_name.)  Login as admin first.
+# ████████████████████████████████████████████████████████████████████████████
+
+### TC12a login as admin
+POST {{real}}/auth/login
+Content-Type: application/json
+
+{ "username": "{{adminUser}}", "password": "{{adminPass}}" }
+
+### TC12b create a name that already exists (run twice if needed) -> 409 generic
+#   Response has NO SQL text / stack trace. Raw error is console.error'd server-side.
+POST {{real}}/ingredients
+Content-Type: application/json
+
+{ "name": "Unbleached Bread Flour", "unit": "g", "reorder": 100 }
+
+### TC12c malformed JSON body -> 400 "Bad request" (handled by app.js error mw)
+POST {{real}}/ingredients
+Content-Type: application/json
+
+{ "name": "oops", "unit": "g", "reorder": }
+
+
+# ████████████████████████████████████████████████████████████████████████████
+#  TC13 — Trigger   Expected: inserting a 'consumption' stock_movement fires
+#  trg_stock_no_negative (BEFORE INSERT on stock_movement). Over-consuming is
+#  blocked with SQLSTATE 45000 -> the API returns 409. A valid batch decrements
+#  stock. Creating a batch is the user-facing action that inserts consumption.
+#  Login as admin (or any logged-in user) first.
+# ████████████████████████████████████████████████████████████████████████████
+
+### TC13a login
+POST {{real}}/auth/login
+Content-Type: application/json
+
+{ "username": "{{adminUser}}", "password": "{{adminPass}}" }
+
+### TC13b find a REAL feeding to attach the batch to (need a valid starter_id + feed_time)
+GET {{real}}/starters/1/feedings
+
+### TC13c TRIGGER FIRES: consume an absurd qty -> 409 "Not enough stock..."
+#   Replace feeding_time with a feed_time from TC13b. The huge qty forces the
+#   trigger's SIGNAL. (If you get 404, the feeding_time didn't match a row.)
+POST {{real}}/batches
+Content-Type: application/json
+
+{
+  "starter_id": 1,
+  "feeding_time": "REPLACE_WITH_FEED_TIME_FROM_TC13b",
+  "qty_removed_g": 50,
+  "loaf_count": 1,
+  "items": [ { "ingredient_id": 1, "qty": 999999, "cost": 10 } ]
+}
+
+### TC13d VALID batch: a small qty within stock -> 201 { id }, stock decremented
+#   Verify afterward: GET /stock-movements?ingredient_id=1 shows a 'consumption' row.
+POST {{real}}/batches
+Content-Type: application/json
+
+{
+  "starter_id": 1,
+  "feeding_time": "REPLACE_WITH_FEED_TIME_FROM_TC13b",
+  "qty_removed_g": 50,
+  "loaf_count": 1,
+  "items": [ { "ingredient_id": 1, "qty": 100, "cost": 10 } ]
+}
+
+
+# ████████████████████████████████████████████████████████████████████████████
+#  TC14 — Stored procedure   Expected: an SP runs via an endpoint.
+#  restock calls sp_record_restock; batch create calls
+#  sp_add_batch_with_consumption (TC13). Restock needs admin/developer.
+# ████████████████████████████████████████████████████████████████████████████
+
+### TC14a login as admin
+POST {{real}}/auth/login
+Content-Type: application/json
+
+{ "username": "{{adminUser}}", "password": "{{adminPass}}" }
+
+### TC14b call sp_record_restock via the endpoint -> 201 { ingredient_id, qty, reason }
+POST {{real}}/stock-movements/restock
+Content-Type: application/json
+
+{ "ingredient_id": 1, "qty": 5000, "reason": "TC14 stored-procedure test" }
+
+### TC14c confirm the SP wrote a 'restock' stock_movement row
+GET {{real}}/stock-movements?ingredient_id=1
