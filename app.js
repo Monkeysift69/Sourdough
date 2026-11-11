@@ -20,6 +20,7 @@ app.use(require('./routes/batch.route'));
 app.use(require('./routes/ingredient.route'));
 app.use(require('./routes/stocks.routes'));
 app.use(require('./routes/user.route'));
+app.use(require('./routes/report.route'));
 
 // Last stop for any error a route didn't handle (e.g. broken JSON in a request body).
 // The real error is logged here on the server; the browser only gets a generic message.

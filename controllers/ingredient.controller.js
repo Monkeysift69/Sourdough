@@ -17,17 +17,10 @@ exports.getAll = async (req, res) => {
 }
 
 // GET /ingredients/stock
-// stock = everything restocked - everything consumed
+// Reads the view v_ingredient_stock: stock = everything restocked - everything consumed
 exports.getStock = async (req, res) => {
   try {
-    const [rows] = await pool.execute(
-      `SELECT i.id, i.name, i.unit, i.reorder,
-              COALESCE(SUM(CASE WHEN sm.movement_type = 'restock' THEN sm.qty ELSE -sm.qty END), 0) AS stock
-         FROM ingredient i
-         LEFT JOIN stock_movement sm ON sm.ingredient_id = i.id
-        GROUP BY i.id, i.name, i.unit, i.reorder
-        ORDER BY i.name`
-    );
+    const [rows] = await pool.execute('SELECT * FROM v_ingredient_stock ORDER BY name');
     res.json(rows);
   } catch (err) {
     fail(res, err);

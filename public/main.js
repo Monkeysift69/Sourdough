@@ -300,6 +300,7 @@ const TABS = [
   { id: 'starters', label: 'Starters', title: 'The jars' },
   { id: 'batches',  label: 'Bakes',    title: 'Bakes' },
   { id: 'stock',    label: 'Pantry',   title: 'Pantry' },
+  { id: 'reports',  label: 'Reports',  title: 'Reports' },
   { id: 'users',    label: 'Bakers',   title: 'Bakers', perm: 'user.manage' },
 ];
 const WD = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'];
@@ -331,7 +332,7 @@ function renderAll() {
   const t = TABS.find(x => x.id === activeTab);
   if (!t || (t.perm && !can(t.perm))) activeTab = 'starters';
   renderSidebar();
-  const view = { starters: viewStarters, batches: viewBatches, stock: viewStock, users: viewUsers }[activeTab];
+  const view = { starters: viewStarters, batches: viewBatches, stock: viewStock, reports: viewReports, users: viewUsers }[activeTab];
   $('#main').innerHTML = pageHead() + view();
   if (activeTab === 'stock') renderCalcResult();
 }
@@ -343,6 +344,7 @@ function renderSidebar() {
   const note = { starters: hungry ? `<span class="text-accent">${hungry} hungry</span>` : db.starter.length,
                  batches: active ? `${active} on the go` : db.batch.length,
                  stock: low ? `<span class="text-accent">${low} low</span>` : 'stocked',
+                 reports: '5 queries',
                  users: db.user.length };
   $('#sideNav').innerHTML = `<ul class="pl-[22px] space-y-1">${TABS.filter(t => !t.perm || can(t.perm)).map(t => `
     <li><button type="button" class="nav-a ${t.id === activeTab ? 'on' : ''}" data-action="nav" data-tab="${t.id}">
@@ -582,6 +584,50 @@ function ledgerSection() {
   }).join('');
   return section('Stock ledger', filterLinks('ledger-filter', ledgerFilter, [['all', 'All'], ['restock', 'In'], ['consumption', 'Out']]),
     `<div class="max-h-[520px] overflow-y-auto scroll-thin">${table(th('No.') + th('When') + th('Ingredient') + th('Qty', 'text-right') + th('Note') + th('Cost paid', 'text-right') + th('Subtype row', 'schema-only'), body, 'No movements.', 7)}</div>`);
+}
+
+/* ---------- Reports (read-only queries: view, nested, aggregate) ---------- */
+let reports = null, reportsError = '';
+async function loadReports() {
+  try {
+    const [lowStock, bigBakes, unused, topSpend, output] = await Promise.all([
+      api('GET', '/reports/low-stock'), api('GET', '/reports/big-bakes'), api('GET', '/reports/unused-ingredients'),
+      api('GET', '/reports/top-spend'), api('GET', '/reports/starter-output'),
+    ]);
+    reports = { lowStock, bigBakes, unused, topSpend, output }; reportsError = '';
+  } catch (e) { reportsError = e.message; }
+  if (activeTab === 'reports') renderAll();
+}
+function viewReports() {
+  if (reportsError) return section('Reports', '', `<p class="py-6 text-accent font-serif italic">${esc(reportsError)}</p>`, true);
+  if (!reports) return section('Reports', '', '<p class="py-6 text-ink/45 font-serif italic">Loading…</p>', true);
+  const r = reports;
+  return section('Running low', '',
+      table(th('Ingredient') + th('On hand', 'text-right') + th('Reorder at', 'text-right'),
+        r.lowStock.map(x => tr(td(esc(x.name)) + td(`<span class="text-accent">${fmtQ(x.stock)}</span> <span class="text-ink/50">${esc(x.unit)}</span>`, 'text-right tnum') + td(`${fmtQ(x.reorder)} <span class="text-ink/50">${esc(x.unit)}</span>`, 'text-right tnum text-ink/70'))).join(''),
+        'Nothing is at or below its reorder line.', 3)
+      + schema('<span class="block mt-2">VIEW v_ingredient_stock — WHERE stock &lt;= reorder</span>'), true)
+    + section('Bakes above the average', '',
+      table(th('Bake') + th('Starter') + th('Loaves', 'text-right') + th('Average', 'text-right'),
+        r.bigBakes.map(x => tr(td('No. ' + x.id, 'font-mono text-xs text-ink/60') + td(esc(x.starter_name)) + td(String(x.loaf_count), 'text-right tnum') + td(fmtQ(x.avg_loaves), 'text-right tnum text-ink/60'))).join(''),
+        'No bake beats the average yet.', 4)
+      + schema('<span class="block mt-2">nested query — WHERE loaf_count &gt; (SELECT AVG(loaf_count) FROM batch)</span>'))
+    + section('Never used in a bake', '',
+      table(th('Ingredient') + th('Unit'),
+        r.unused.map(x => tr(td(esc(x.name)) + td(esc(x.unit), 'text-ink/60'))).join(''),
+        'Every ingredient has gone into at least one bake.', 2)
+      + schema('<span class="block mt-2">nested query — WHERE NOT EXISTS (SELECT 1 FROM stock_movement … batch_id IS NOT NULL)</span>'))
+    + section('Where the money goes', '',
+      table(th('Ingredient') + th('Deliveries', 'text-right') + th('Spent', 'text-right'),
+        r.topSpend.map(x => tr(td(esc(x.name)) + td(String(x.deliveries), 'text-right tnum') + td(fmtMoney(x.total_spent), 'text-right tnum'))).join(''),
+        'No restocks recorded.', 3)
+      + '<p class="text-[13px] text-ink/50 mt-2 font-serif italic">Only ingredients that cost more than the average ingredient.</p>'
+      + schema('<span class="block mt-2">GROUP BY ingredient HAVING SUM(cost) &gt; (SELECT AVG(…) FROM (SELECT SUM(cost) … GROUP BY ingredient) t)</span>'))
+    + section('Output per starter', '',
+      table(th('Starter') + th('Bakes', 'text-right') + th('Loaves', 'text-right') + th('Per bake', 'text-right'),
+        r.output.map(x => tr(td(esc(x.name)) + td(String(x.bakes), 'text-right tnum') + td(String(x.loaves), 'text-right tnum') + td(x.avg_loaves == null ? '—' : fmtQ(x.avg_loaves), 'text-right tnum text-ink/60'))).join(''),
+        'No starters.', 4)
+      + schema('<span class="block mt-2">starter LEFT JOIN batch — COUNT, SUM, AVG … GROUP BY starter</span>'));
 }
 
 /* ---------- Bakers (admin) ---------- */
@@ -927,7 +973,7 @@ function initLogin() {
 /* =====================================================================
    EVENTS + INIT
    ===================================================================== */
-const goTab = tab => { setSidebar(false); activeTab = tab; renderAll(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
+const goTab = tab => { setSidebar(false); activeTab = tab; renderAll(); if (tab === 'reports') loadReports(); window.scrollTo({ top: 0, behavior: 'smooth' }); };
 const actions = {
   tab: d => goTab(d.tab),
   nav: d => goTab(d.tab),

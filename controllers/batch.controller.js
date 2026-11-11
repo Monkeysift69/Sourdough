@@ -9,10 +9,7 @@ function fail(res, err) {
 exports.getAll = async (req, res) => {
     try {
         const [rows] = await pool.execute(
-            `SELECT b.*, s.name AS starter_name
-               FROM batch b
-               JOIN starter s ON b.starter_id = s.id
-              ORDER BY b.id DESC`
+            'SELECT * FROM v_batch_summary ORDER BY id DESC'
         );
         res.json(rows);
     } catch (err) {
