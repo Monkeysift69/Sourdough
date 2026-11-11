@@ -1,7 +1,11 @@
-const pool = require('../config/db');
+// Queries run on the logged-in person's own MySQL account: req.db (set by requireLogin).
 
 // Log details on the server; send only a generic message to the client.
 function fail(res, err) {
+  // MySQL itself said this account has no privilege for it (GRANT missing)
+  if (err.errno === 1142 || err.errno === 1143 || err.errno === 1370) {
+    return res.status(403).json({ error: 'The database refused: your role cannot do this' });
+  }
   console.error(err);
   res.status(500).json({ error: 'Something went wrong. Please try again later.' });
 }
@@ -9,7 +13,7 @@ function fail(res, err) {
 // GET /ingredients
 exports.getAll = async (req, res) => {
   try {
-    const [rows] = await pool.execute('SELECT * FROM ingredient ORDER BY name');
+    const [rows] = await req.db.execute('SELECT * FROM ingredient ORDER BY name');
     res.json(rows);
   } catch (err) {
     fail(res, err);
@@ -20,7 +24,7 @@ exports.getAll = async (req, res) => {
 // stock = everything restocked - everything consumed
 exports.getStock = async (req, res) => {
   try {
-    const [rows] = await pool.execute(
+    const [rows] = await req.db.execute(
       `SELECT i.id, i.name, i.unit, i.reorder,
               COALESCE(SUM(CASE WHEN sm.movement_type = 'restock' THEN sm.qty ELSE -sm.qty END), 0) AS stock
          FROM ingredient i
@@ -42,7 +46,7 @@ exports.getOne = async (req, res) => {
   }
 
   try {
-    const [rows] = await pool.execute('SELECT * FROM ingredient WHERE id = ?', [id]);
+    const [rows] = await req.db.execute('SELECT * FROM ingredient WHERE id = ?', [id]);
     if (rows.length === 0) return res.status(404).json({ error: 'Ingredient not found' });
     res.json(rows[0]);
   } catch (err) {
@@ -65,7 +69,7 @@ exports.create = async (req, res) => {
   }
 
   try {
-    const [r] = await pool.execute(
+    const [r] = await req.db.execute(
       'INSERT INTO ingredient (name, unit, reorder) VALUES (?, ?, ?)',
       [name, unit, reorder]
     );
@@ -97,7 +101,7 @@ exports.update = async (req, res) => {
   }
 
   try {
-    const [r] = await pool.execute(
+    const [r] = await req.db.execute(
       'UPDATE ingredient SET name = ?, unit = ?, reorder = ? WHERE id = ?',
       [name, unit, reorder, id]
     );
@@ -119,7 +123,7 @@ exports.remove = async (req, res) => {
   }
 
   try {
-    const [r] = await pool.execute('DELETE FROM ingredient WHERE id = ?', [id]);
+    const [r] = await req.db.execute('DELETE FROM ingredient WHERE id = ?', [id]);
     if (r.affectedRows === 0) return res.status(404).json({ error: 'Ingredient not found' });
     res.status(204).end();
   } catch (err) {

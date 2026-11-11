@@ -98,3 +98,17 @@ Tick each case during the demo. Requests for every case are in `http/test.http`.
   - Steps: `POST /stock-movements/restock`.
   - Expected: **201**; `sp_record_restock` writes a `restock` row (visible via `GET /stock-movements?ingredient_id=1`).
   - Result: ______
+
+## Database-level privilege
+
+- [ ] **TC15 — Privilege lives in MySQL, not in the `user` table** · _role: all_
+  - Steps (Workbench, as root):
+    1. `SELECT * FROM v_user_roles;` and `SHOW GRANTS FOR 'sd_baker'@'localhost' USING sourdough_user;`
+    2. Tamper with our table: `UPDATE user SET username = 'tmp' WHERE id = 1; UPDATE user SET username = 'dev' WHERE id = 3; UPDATE user SET username = 'baker' WHERE id = 1;` (swaps the dev and baker rows)
+    3. Log in on the website as `baker / baker123`, try **Record a delivery** and the **Bakers** page.
+    4. Put the rows back (same three UPDATEs with `baker` and `dev` swapped).
+    5. New Workbench connection as `sd_baker` / `baker123`: `UPDATE user SET username = 'x';`, `GRANT sourdough_developer TO 'sd_baker'@'localhost';`, `DROP TABLE batch;`
+  - Expected: step 3 is still a baker (no delivery button, `/users` → **403**). Step 5: every statement is refused by MySQL (**1142** / **1227**).
+  - Also run `TC15a`–`TC15g` in `test.http`: register **201**, baker restock **403**, promote **200**, remove **204**.
+  - Result: tampered login ___  Workbench as sd_baker ___  API ___
+

@@ -4,7 +4,7 @@
 -- Running it again wipes the tables and starts over.
 -- Times are relative to NOW(), so READY / HUNGRY / RISING are live every time you seed.
 --
--- Demo logins:  dev / dev123   admin / admin123   baker / baker123
+-- Logins are MySQL accounts made by roles.sql (run it after this file the first time).
 -- =====================================================================
 USE sourdough;
 
@@ -17,19 +17,10 @@ TRUNCATE TABLE batch;
 TRUNCATE TABLE feeding;
 TRUNCATE TABLE starter;
 TRUNCATE TABLE ingredient;
-TRUNCATE TABLE user;
 SET FOREIGN_KEY_CHECKS = 1;
 
 -- one fixed "now" (to the minute) so every row below lines up exactly
 SET @now = STR_TO_DATE(DATE_FORMAT(NOW(), '%Y-%m-%d %H:%i:00'), '%Y-%m-%d %H:%i:%s');
-
--- ---------------------------------------------------------------------
--- user  (password_hash = bcrypt, cost 10)
--- ---------------------------------------------------------------------
-INSERT INTO user (id, username, password_hash, role) VALUES
-  (1, 'dev',   '$2a$10$fPL29hpffRZGtlKIQkH/kOPlo/xAPAo4rQ2t/kJeDXTOPPjy6WDmC', 'developer'),
-  (2, 'admin', '$2a$10$4QEkxJgI2RJN7KVlKmoK4esmcGmWQwzuZy4GbKuE6Dyugnn4X6r.e', 'admin'),
-  (3, 'baker', '$2a$10$X/AxfiW6YdrXCac.twuJMOgE0ALRsf4Yn6EZYbw5SVcor8M.cin.W', 'user');
 
 -- ---------------------------------------------------------------------
 -- starter
@@ -125,4 +116,4 @@ UNION ALL SELECT 'feeding', COUNT(*) FROM feeding
 UNION ALL SELECT 'batch', COUNT(*) FROM batch
 UNION ALL SELECT 'ingredient', COUNT(*) FROM ingredient
 UNION ALL SELECT 'stock_movement', COUNT(*) FROM stock_movement
-UNION ALL SELECT 'user', COUNT(*) FROM user;
+UNION ALL SELECT 'user', COUNT(*) FROM user;   -- the accounts come from roles.sql

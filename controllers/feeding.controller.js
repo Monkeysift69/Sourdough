@@ -1,6 +1,10 @@
-const pool = require('../config/db');
+// Queries run on the logged-in person's own MySQL account: req.db (set by requireLogin).
 
 function fail(res, err) {
+    // MySQL itself said this account has no privilege for it (GRANT missing)
+    if (err.errno === 1142 || err.errno === 1143 || err.errno === 1370) {
+        return res.status(403).json({ error: 'The database refused: your role cannot do this' });
+    }
     console.error(err);
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
 }
@@ -21,7 +25,7 @@ exports.getOne = async (req, res) => {
     }
 
     try {
-        const [rows] = await pool.execute(
+        const [rows] = await req.db.execute(
             'SELECT * FROM feeding WHERE starter_id = ? AND feed_time = ?',
             [starterId, feedTime]
         );
@@ -56,7 +60,7 @@ exports.update = async (req, res) => {
     }
 
     try {
-        const [r] = await pool.execute(
+        const [r] = await req.db.execute(
             'UPDATE feeding SET temp = ?, peaktime = ?, qty_added_g = ? WHERE starter_id = ? AND feed_time = ?',
             [temp ?? null, peaktime ?? null, qty_added_g, starterId, feedTime]
         );
@@ -80,7 +84,7 @@ exports.remove = async (req, res) => {
     }
 
     try {
-        const [r] = await pool.execute(
+        const [r] = await req.db.execute(
             'DELETE FROM feeding WHERE starter_id = ? AND feed_time = ?',
             [starterId, feedTime]
         );

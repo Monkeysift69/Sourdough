@@ -1,6 +1,10 @@
-const pool = require('../config/db');
+// Queries run on the logged-in person's own MySQL account: req.db (set by requireLogin).
 
 function fail(res, err) {
+    // MySQL itself said this account has no privilege for it (GRANT missing)
+    if (err.errno === 1142 || err.errno === 1143 || err.errno === 1370) {
+        return res.status(403).json({ error: 'The database refused: your role cannot do this' });
+    }
     console.error(err);
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
 }
@@ -8,7 +12,7 @@ function fail(res, err) {
 // GET /starters
 exports.getAll = async (req, res) => {
     try {
-        const [rows] = await pool.execute('SELECT * FROM starter');
+        const [rows] = await req.db.execute('SELECT * FROM starter');
         res.json(rows);
     } catch (err) {
         fail(res, err);
@@ -23,7 +27,7 @@ exports.getOne = async (req, res) => {
     }
 
     try {
-        const [rows] = await pool.execute('SELECT * FROM starter WHERE id = ?', [id]);
+        const [rows] = await req.db.execute('SELECT * FROM starter WHERE id = ?', [id]);
         if (rows.length === 0) return res.status(404).json({ error: 'Starter not found' });
         res.json(rows[0]);
     } catch (err) {
@@ -52,7 +56,7 @@ exports.create = async (req, res) => {
     }
 
     try {
-        const [r] = await pool.execute(
+        const [r] = await req.db.execute(
             'INSERT INTO starter (name, flour_type, hydration, born, min_weight_g) VALUES (?, ?, ?, ?, ?)',
             [name, flour_type, hydration, born, min_weight_g]
         );
@@ -87,7 +91,7 @@ exports.update = async (req, res) => {
     }
 
     try {
-        const [r] = await pool.execute(
+        const [r] = await req.db.execute(
             'UPDATE starter SET name = ?, flour_type = ?, hydration = ?, born = ?, min_weight_g = ? WHERE id = ?',
             [name, flour_type, hydration, born, min_weight_g, id]
         );
@@ -106,7 +110,7 @@ exports.remove = async (req, res) => {
     }
 
     try {
-        const [r] = await pool.execute('DELETE FROM starter WHERE id = ?', [id]);
+        const [r] = await req.db.execute('DELETE FROM starter WHERE id = ?', [id]);
         if (r.affectedRows === 0) return res.status(404).json({ error: 'Starter not found' });
         res.status(204).end();
     } catch (err) {
@@ -126,7 +130,7 @@ exports.listFeedings = async (req, res) => {
     }
 
     try {
-        const [rows] = await pool.execute(
+        const [rows] = await req.db.execute(
             'SELECT * FROM feeding WHERE starter_id = ? ORDER BY feed_time DESC',
             [id]
         );
@@ -158,7 +162,7 @@ exports.addFeeding = async (req, res) => {
     }
 
     try {
-        await pool.execute(
+        await req.db.execute(
             'INSERT INTO feeding (starter_id, feed_time, temp, peaktime, qty_added_g) VALUES (?, ?, ?, ?, ?)',
             [id, feed_time, temp ?? null, peaktime ?? null, qty_added_g]
         );

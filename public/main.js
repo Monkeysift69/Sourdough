@@ -870,9 +870,9 @@ function openUserModal(id) {
   const u = id ? db.user.find(x => x.id === id) : null;
   openModal({
     title: u ? `Edit baker · ${esc(u.username)}` : 'Add a baker', submitLabel: u ? 'Save Changes' : 'Create Account',
-    subtitle: u ? 'PATCH /users/:id/role → UPDATE user SET role = ? WHERE id = ?' : 'POST /auth/register, then PATCH /users/:id/role',
+    subtitle: u ? 'PATCH /users/:id/role → CALL sp_set_role(?, ?): REVOKE old role, GRANT new one in MySQL' : 'POST /auth/register → CALL sp_register_user: CREATE USER sd_<name> + GRANT sourdough_user',
     body: `<div class="grid gap-3">
-      ${field('Username *', `<input name="username" class="input" maxlength="50" value="${esc(u?.username ?? '')}" ${u ? 'readonly' : ''}>`)}
+      ${field('Username * (3-29 letters, digits, _)', `<input name="username" class="input" maxlength="29" value="${esc(u?.username ?? '')}" ${u ? 'readonly' : ''}>`)}
       ${field('Role *', `<select name="role" class="input">${['user', 'admin', 'developer'].map(r => `<option ${u?.role === r ? 'selected' : ''}>${r}</option>`).join('')}</select>`)}
       ${u ? '' : field('Password * (min 8)', `<input name="password" type="password" class="input" autocomplete="new-password">`)}</div>`,
     onSubmit(form, errEl) {
@@ -891,7 +891,7 @@ let authMode = 'login';
 function setAuthMode(m) {
   authMode = m;
   $('#authTitle').textContent = m === 'login' ? 'Sign in' : 'Create a baker account';
-  $('#authSub').textContent = m === 'login' ? 'POST /auth/login — SELECT … FROM user WHERE username = ?, then bcrypt.compare' : 'POST /auth/register — bcrypt.hash, then INSERT INTO user (username, password_hash)';
+  $('#authSub').textContent = m === 'login' ? 'POST /auth/login — connect to MySQL as sd_<username>, then SELECT CURRENT_ROLE()' : 'POST /auth/register — CALL sp_register_user: CREATE USER + GRANT sourdough_user';
   $('#authSubmit span').textContent = m === 'login' ? 'Sign in' : 'Register';
   $('#authSwitchText').textContent = m === 'login' ? 'No account?' : 'Have an account?';
   $('#authSwitch').textContent = m === 'login' ? 'Register as baker' : 'Sign in';

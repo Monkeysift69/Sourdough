@@ -1,7 +1,11 @@
-const pool = require('../config/db');
+// Queries run on the logged-in person's own MySQL account: req.db (set by requireLogin).
 
 // Log details on the server; send only a generic message to the client.
 function fail(res, err) {
+  // MySQL itself said this account has no privilege for it (GRANT missing)
+  if (err.errno === 1142 || err.errno === 1143 || err.errno === 1370) {
+    return res.status(403).json({ error: 'The database refused: your role cannot do this' });
+  }
   console.error(err);
   res.status(500).json({ error: 'Something went wrong. Please try again later.' });
 }
@@ -19,7 +23,7 @@ exports.list = async (req, res) => {
 
   try {
     // One fixed query: when ingredientId is NULL the first test is true, so every row is returned
-    const [rows] = await pool.execute(
+    const [rows] = await req.db.execute(
       `SELECT sm.id, sm.movement_date, sm.movement_type, sm.qty,
               i.id AS ingredient_id, i.name AS ingredient, i.unit,
               sm.batch_id, rm.cost, cm.reason
@@ -52,7 +56,7 @@ exports.restock = async (req, res) => {
   }
 
   try {
-    await pool.execute('CALL sp_record_restock(?, ?, ?)', [ingredient_id, qty, cost]);
+    await req.db.execute('CALL sp_record_restock(?, ?, ?)', [ingredient_id, qty, cost]);
     res.status(201).json({ ingredient_id, qty, cost });
   } catch (err) {
     if (err.code === 'ER_NO_REFERENCED_ROW_2') {
@@ -83,7 +87,7 @@ exports.waste = async (req, res) => {
 
   let conn;
   try {
-    conn = await pool.getConnection();
+    conn = await req.db.getConnection();
     await conn.beginTransaction();
     const [r] = await conn.execute(
       "INSERT INTO stock_movement (ingredient_id, movement_date, qty, movement_type, batch_id) VALUES (?, NOW(), ?, 'consumption', NULL)",

@@ -1,6 +1,10 @@
-const pool = require('../config/db');
+// Queries run on the logged-in person's own MySQL account: req.db (set by requireLogin).
 
 function fail(res, err) {
+    // MySQL itself said this account has no privilege for it (GRANT missing)
+    if (err.errno === 1142 || err.errno === 1143 || err.errno === 1370) {
+        return res.status(403).json({ error: 'The database refused: your role cannot do this' });
+    }
     console.error(err);
     res.status(500).json({ error: 'Something went wrong. Please try again.' });
 }
@@ -8,7 +12,7 @@ function fail(res, err) {
 // GET /batches
 exports.getAll = async (req, res) => {
     try {
-        const [rows] = await pool.execute(
+        const [rows] = await req.db.execute(
             `SELECT b.*, s.name AS starter_name
                FROM batch b
                JOIN starter s ON b.starter_id = s.id
@@ -28,7 +32,7 @@ exports.getOne = async (req, res) => {
     }
 
     try {
-        const [rows] = await pool.execute(
+        const [rows] = await req.db.execute(
             `SELECT b.*, s.name AS starter_name
                FROM batch b
                JOIN starter s ON b.starter_id = s.id
@@ -37,7 +41,7 @@ exports.getOne = async (req, res) => {
         );
         if (rows.length === 0) return res.status(404).json({ error: 'Batch not found' });
 
-        const [items] = await pool.execute(
+        const [items] = await req.db.execute(
             `SELECT sm.id AS movement_id, i.id AS ingredient_id, i.name, i.unit, sm.qty
                FROM stock_movement sm
                JOIN ingredient i ON sm.ingredient_id = i.id
@@ -88,7 +92,7 @@ exports.create = async (req, res) => {
     // START TRANSACTION / COMMIT / ROLLBACK, so no beginTransaction here.
     let conn;
     try {
-        conn = await pool.getConnection();
+        conn = await req.db.getConnection();
         await conn.query(
             'CALL sp_add_batch_with_consumption(?, ?, ?, ?, ?, @bid)',
             [starter_id, feeding_time, qty_removed_g, loaf_count,
@@ -139,7 +143,7 @@ exports.update = async (req, res) => {
     try {
         // One fixed query: a field that isn't sent arrives as NULL,
         // and COALESCE(NULL, column) keeps the value already stored.
-        const [r] = await pool.execute(
+        const [r] = await req.db.execute(
             `UPDATE batch
                 SET mix_time           = COALESCE(?, mix_time),
                     bulk_ferment_start = COALESCE(?, bulk_ferment_start),
@@ -173,7 +177,7 @@ exports.remove = async (req, res) => {
     }
 
     try {
-        const [r] = await pool.execute('DELETE FROM batch WHERE id = ?', [id]);
+        const [r] = await req.db.execute('DELETE FROM batch WHERE id = ?', [id]);
         if (r.affectedRows === 0) return res.status(404).json({ error: 'Batch not found' });
         res.status(204).end();
     } catch (err) {

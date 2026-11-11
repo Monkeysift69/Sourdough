@@ -22,7 +22,7 @@
 
 @real = http://localhost:3650
 
-# Seeded accounts (sql/seed.sql). Fill in the passwords you seeded with.
+# Demo accounts = MySQL accounts made by sql/roles.sql (sd_dev, sd_admin, sd_baker).
 @devUser   = dev
 @devPass   = dev123
 @adminUser = admin
@@ -254,12 +254,10 @@ GET {{real}}/feedings/1/2026-01-01%27%20AND%20SLEEP(5)--%20
 # ████████████████████████████████████████████████████████████████████████████
 #  TC11 — Security: queries use ? placeholders; no creds in code  [MANUAL]
 #  Expected: parameterised queries only; credentials live in .env, not source.
-#  Check: grep the controllers — every pool.execute uses ? + an array.
-#     grep -rn "pool.execute" controllers/      # all use ?, none build SQL by +
+#  Check: grep the controllers — every req.db.execute uses ? + an array.
+#     grep -rn "req.db.execute" controllers/    # all use ?, none build SQL by +
 #     config/db.js reads process.env.DB_*       # no literal password
 #     .env is in .gitignore                      # secrets not committed
-#  The only interpolation (batch.controller UPDATE) injects WHITELISTED column
-#  names, never user input — values still go through ?.
 # ████████████████████████████████████████████████████████████████████████████
 
 
@@ -376,3 +374,49 @@ Content-Type: application/json
 
 ### TC14c confirm the SP wrote a 'restock' stock_movement row
 GET {{real}}/stock-movements?ingredient_id=1
+
+
+# ████████████████████████████████████████████████████████████████████████████
+#  TC15 — Privilege is stored in MySQL (GRANT), not in our tables
+#  Every baker is a MySQL account 'sd_<username>'@'localhost' with a MySQL role.
+#  The API runs each request on that person's own connection, so MySQL checks
+#  the GRANT itself. The Workbench part is in http/test-cases.md (TC15).
+# ████████████████████████████████████████████████████████████████████████████
+
+### TC15a register a new baker -> 201 (CALL sp_register_user: CREATE USER + GRANT sourdough_user)
+POST {{real}}/auth/register
+Content-Type: application/json
+
+{ "username": "tc15baker", "password": "tc15baker123" }
+
+### TC15b log in as them -> 200, role "user" (from SELECT CURRENT_ROLE())
+POST {{real}}/auth/login
+Content-Type: application/json
+
+{ "username": "tc15baker", "password": "tc15baker123" }
+
+### TC15c baker tries a delivery -> 403
+POST {{real}}/stock-movements/restock
+Content-Type: application/json
+
+{ "ingredient_id": 1, "qty": 10, "cost": 1 }
+
+### TC15d log in as developer and find tc15baker's id
+POST {{real}}/auth/login
+Content-Type: application/json
+
+{ "username": "{{devUser}}", "password": "{{devPass}}" }
+
+### TC15e list users -> roles come from mysql.role_edges (view v_user_roles)
+# @name tc15Users
+GET {{real}}/users
+
+### TC15f promote tc15baker to admin -> 200 (CALL sp_set_role: REVOKE + GRANT sourdough_admin)
+#   Replace 4 with tc15baker's id from TC15e if it differs.
+PATCH {{real}}/users/4/role
+Content-Type: application/json
+
+{ "role": "admin" }
+
+### TC15g remove tc15baker -> 204 (CALL sp_delete_user: DROP USER)
+DELETE {{real}}/users/4
